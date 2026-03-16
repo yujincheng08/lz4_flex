@@ -43,21 +43,44 @@ const TRAILING_LITERALS: usize = 3;
 /// Run mask for literal/match length encoding
 const RUN_MASK: usize = 15;
 
+/// Hash table with chain for LZ4 high compression.
+///
+/// Uses a two-level structure: `dict` maps each hash to the most recent input
+/// position, and `chain_table` links older positions with the same hash via
+/// stored deltas, forming an implicit linked list per hash bucket.
 #[derive(Debug)]
 pub struct HashTableHCU32 {
-    dict: Box<[u32; HASHTABLE_SIZE_HC]>,  // Fixed size, hash function bounds to this range
-    chain_table: Box<[u16]>,              // Dynamic size, power of 2 for masking
+    /// Primary hash table: maps a 15-bit hash of each 4-byte sequence to the
+    /// most recent input position (as `u32`) where that hash was seen.
+    /// Fixed size of 2^15 entries, matching the output range of `hash_hc`.
+    dict: Box<[u32; HASHTABLE_SIZE_HC]>,
+    /// Chain table: stores a backward delta (as `u16`) at each position,
+    /// pointing to the previous position with the same hash. Indexed by
+    /// `pos & chain_mask()`. Dynamically sized (power of 2, up to
+    /// `MAX_DISTANCE_HC`) based on input length, enabling efficient masking.
+    chain_table: Box<[u16]>,
+    /// Next input position to be inserted into the hash/chain tables.
+    /// Positions below this have already been indexed; the compressor
+    /// lazily inserts up to the current search offset on demand.
     next_to_update: usize,
+    /// Maximum number of chain links to follow per search. Higher values
+    /// yield better compression at the cost of more CPU time. Determined
+    /// by the chosen compression level.
     max_attempts: usize,
 }
 
-/// Match structure for storing match information.
-/// Uses u32 fields (12 bytes total vs 24 with usize) to reduce stack
-/// pressure in the HC inner loop which juggles 4 Match structs.
+/// A single LZ4 back-reference match.
+///
+/// Uses `u32` fields (12 bytes total vs 24 with `usize` on 64-bit) to reduce
+/// stack pressure in the HC inner loop, which juggles up to 4 `Match` structs.
 #[derive(Debug, Clone, Copy)]
 pub struct Match {
+    /// Byte position in the input where this match starts (the "current" cursor).
     pub start: u32,
+    /// Length of the match in bytes (including the mandatory 4-byte minimum).
     pub len: u32,
+    /// Byte position of the earlier occurrence being referenced.
+    /// The encoded offset/distance is `start - ref_pos`.
     pub ref_pos: u32,
 }
 
@@ -96,19 +119,20 @@ impl Match {
     }
 }
 
-/// Count how many bytes starting at `pos` match the repeated 4-byte pattern.
-/// The pattern must be a single repeated byte (length-1 repeat).
+/// Count how many consecutive bytes starting at `pos` equal a single repeated
+/// byte value. `pattern` is that byte broadcast to all 4 lanes of a `u32`
+/// (e.g. `0xABABABAB`). Widened to `usize` internally for batch comparison.
 /// Equivalent to C's LZ4HC_countPattern.
 #[inline]
-fn count_pattern(input: &[u8], pos: usize, limit: usize, pattern32: u32) -> usize {
+fn count_pattern(input: &[u8], pos: usize, limit: usize, pattern: u32) -> usize {
     let limit = limit.min(input.len());
     let mut p = pos;
 
     // Extend 32-bit pattern to usize for batch comparison
     let pattern: usize = if core::mem::size_of::<usize>() == 8 {
-        (pattern32 as usize) | ((pattern32 as usize) << 32)
+        (pattern as usize) | ((pattern as usize) << 32)
     } else {
-        pattern32 as usize
+        pattern as usize
     };
 
     const STEP: usize = core::mem::size_of::<usize>();
@@ -123,7 +147,7 @@ fn count_pattern(input: &[u8], pos: usize, limit: usize, pattern32: u32) -> usiz
     }
 
     // Byte-by-byte tail
-    let byte_val = (pattern32 & 0xFF) as u8; // single repeated byte
+    let byte_val = (pattern & 0xFF) as u8; // single repeated byte
     while p < limit && input[p] == byte_val {
         p += 1;
     }
@@ -131,21 +155,23 @@ fn count_pattern(input: &[u8], pos: usize, limit: usize, pattern32: u32) -> usiz
     p - pos
 }
 
-/// Count how many bytes going backward from `pos` match the repeated 4-byte pattern.
+/// Count how many consecutive bytes going backward from `pos` match a single
+/// repeated byte value. `pattern` is that byte broadcast to all 4 lanes of a
+/// `u32`, same encoding as [`count_pattern`].
 /// Equivalent to C's LZ4HC_reverseCountPattern.
 #[inline]
-fn reverse_count_pattern(input: &[u8], pos: usize, low_limit: usize, pattern32: u32) -> usize {
+fn reverse_count_pattern(input: &[u8], pos: usize, low_limit: usize, pattern: u32) -> usize {
     let mut p = pos;
 
     while p >= low_limit + 4 {
-        if super::compress::get_batch(input, p - 4) != pattern32 {
+        if super::compress::get_batch(input, p - 4) != pattern {
             break;
         }
         p -= 4;
     }
 
     // Byte-by-byte tail using native endian byte order (matches get_batch)
-    let pattern_bytes = pattern32.to_ne_bytes();
+    let pattern_bytes = pattern.to_ne_bytes();
     let mut byte_idx: usize = 3;
     while p > low_limit {
         if input[p - 1] != pattern_bytes[byte_idx] {
@@ -192,18 +218,11 @@ impl HashTableHCU32 {
             .max(256)
             .next_power_of_two();
 
-        // Zero dict
-        // SAFETY: dict is Box<[u32; HASHTABLE_SIZE_HC]>, filling with 0 is always valid.
-        unsafe {
-            core::ptr::write_bytes(self.dict.as_mut_ptr(), 0, HASHTABLE_SIZE_HC);
-        }
+        self.dict.fill(0);
 
         // Reuse chain table if big enough, otherwise reallocate
         if self.chain_table.len() >= needed_chain_size {
-            // Zero only what we need
-            unsafe {
-                core::ptr::write_bytes(self.chain_table.as_mut_ptr(), 0, needed_chain_size);
-            }
+            self.chain_table[..needed_chain_size].fill(0);
         } else {
             self.chain_table = vec![0u16; needed_chain_size].into_boxed_slice();
         }
