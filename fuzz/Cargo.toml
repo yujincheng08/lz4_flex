@@ -79,3 +79,9 @@ name = "fuzz_roundtrip_hc_cpp"
 path = "fuzz_targets/fuzz_roundtrip_hc_cpp.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_roundtrip_hc_frame"
+path = "fuzz_targets/fuzz_roundtrip_hc_frame.rs"
+test = false
+doc = false
