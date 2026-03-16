@@ -1205,16 +1205,18 @@ fn compress_hc_internal(input: &[u8], output: &mut impl Sink, ht: &mut HashTable
     let mut match2 = Match::new();
     let mut match3 = Match::new();
 
-    'main: while s_off < mf_limit {
+    while s_off < mf_limit {
         if !ht.insert_and_find_best_match(input, s_off as u32, match_limit as u32, &mut match1) {
             s_off += 1;
             continue;
         }
 
-        // Saved, in case we would skip too much
         match0 = match1;
 
-        'search2: loop {
+        // Try to improve match1 by searching for a wider match nearby.
+        // On each iteration either match1 is encoded (and we break back to
+        // the main while), or match1 is replaced with a better candidate.
+        loop {
             debug_assert!(match1.start as usize >= anchor);
             if match1.end() > mf_limit
                 || !ht.insert_and_find_wider_match(
@@ -1226,28 +1228,28 @@ fn compress_hc_internal(input: &[u8], output: &mut impl Sink, ht: &mut HashTable
                     &mut match2,
                 )
             {
-                // No better match
                 match1.encode_to(&input, anchor, output);
                 s_off = match1.end();
                 anchor = s_off;
-                continue 'main;
+                break;
             }
 
-            if match0.start < match1.start {
-                if (match2.start as usize) < match1.start as usize + match0.len as usize {
-                    // Empirical optimization
-                    match1 = match0;
-                }
+            if match0.start < match1.start
+                && (match2.start as usize) < match1.start as usize + match0.len as usize
+            {
+                match1 = match0;
             }
             debug_assert!(match2.start >= match1.start);
 
             if (match2.start - match1.start) < 3 {
-                // First match too small: removed
                 match1 = match2;
-                continue 'search2;
+                continue;
             }
 
-            'search3: loop {
+            // We have two viable matches (match1, match2). Try to find a
+            // third. The inner loop breaks `true` to restart the outer
+            // (search2) loop, or `false` to finish back to the main while.
+            let restart = loop {
                 if (match2.start - match1.start) < OPTIMAL_ML as u32 {
                     let mut new_match_len = match1.len as usize;
                     if new_match_len > OPTIMAL_ML {
@@ -1262,7 +1264,7 @@ fn compress_hc_internal(input: &[u8], output: &mut impl Sink, ht: &mut HashTable
                     }
                 }
 
-                if match2.end() > mf_limit  // C uses <=, so we use >
+                if match2.end() > mf_limit
                     || !ht.insert_and_find_wider_match(
                         input,
                         (match2.end() - 3) as u32,
@@ -1272,25 +1274,21 @@ fn compress_hc_internal(input: &[u8], output: &mut impl Sink, ht: &mut HashTable
                         &mut match3,
                     )
                 {
-                    // No better match -> 2 sequences to encode
                     if (match2.start as usize) < match1.end() {
                         match1.len = (match2.start - match1.start) as u32;
                     }
-                    // Encode seq 1
                     match1.encode_to(input, anchor, output);
                     s_off = match1.end();
                     anchor = s_off;
-                    // Encode seq 2
                     match2.encode_to(input, anchor, output);
                     s_off = match2.end();
                     anchor = s_off;
-                    continue 'main;
+                    break false;
                 }
 
                 if (match3.start as usize) < match1.end() + 3 {
-                    // Not enough space for match 2: remove it
                     if match3.start as usize >= match1.end() {
-                        // Can write Seq1 immediately ==> Seq2 is removed, so Seq3 becomes Seq1
+                        // Seq2 removed; encode Seq1 now, Seq3 becomes new Seq1
                         if (match2.start as usize) < match1.end() {
                             let correction = match1.end() - match2.start as usize;
                             match2.fix(correction);
@@ -1299,25 +1297,21 @@ fn compress_hc_internal(input: &[u8], output: &mut impl Sink, ht: &mut HashTable
                             }
                         }
 
-                        match1.encode_to(
-                            input,
-                            anchor,
-                            output,
-                        );
+                        match1.encode_to(input, anchor, output);
                         s_off = match1.end();
                         anchor = s_off;
 
                         match1 = match3;
                         match0 = match2;
 
-                        continue 'search2;
+                        break true;
                     }
 
                     match2 = match3;
-                    continue 'search3;
+                    continue;
                 }
 
-                // OK, now we have 3 ascending matches; let's write at least the first one
+                // 3 ascending matches — adjust overlap and encode the first
                 if (match2.start as usize) < match1.end() {
                     if (match2.start - match1.start) < ML_MASK as u32 {
                         if match1.len as usize > OPTIMAL_ML {
@@ -1333,18 +1327,20 @@ fn compress_hc_internal(input: &[u8], output: &mut impl Sink, ht: &mut HashTable
                     }
                 }
 
-                match1.encode_to(
-                    input, anchor,
-                    output,
-                );
+                match1.encode_to(input, anchor, output);
                 s_off = match1.end();
                 anchor = s_off;
 
                 match1 = match2;
                 match2 = match3;
 
-                continue 'search3;
+                continue;
+            };
+
+            if restart {
+                continue;
             }
+            break;
         }
     }
 
