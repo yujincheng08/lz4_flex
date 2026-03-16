@@ -32,7 +32,7 @@ pub(crate) mod decompress;
 pub use compress::*;
 pub use decompress::*;
 #[cfg(feature = "hc")]
-pub use compress_hc::{compress_hc, compress_hc_to_vec};
+pub use compress_hc::{compress_hc, compress_hc_to_vec, compress_hc_with_table, compress_hc_to_vec_with_table, CompressTableHC};
 
 use core::{error::Error, fmt};
 

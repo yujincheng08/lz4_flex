@@ -14,7 +14,7 @@ use crate::{
 };
 
 #[cfg(feature = "hc")]
-use crate::block::compress_hc::compress_hc;
+use crate::block::compress_hc::{compress_hc_with_table, CompressTableHC};
 
 use super::Error;
 use super::{
@@ -96,6 +96,9 @@ pub struct FrameEncoder<W: io::Write> {
     /// Compression level (1 = fast, 2 = mid, 3-9 = HC, 10-12 = optimal)
     #[cfg(feature = "hc")]
     compression_level: u8,
+    /// Reusable HC compression table (used for levels 2+, None for level 1)
+    #[cfg(feature = "hc")]
+    hc_table: Option<CompressTableHC>,
 }
 
 impl<W: io::Write> FrameEncoder<W> {
@@ -142,7 +145,6 @@ impl<W: io::Write> FrameEncoder<W> {
         FrameEncoder {
             src: Vec::new(),
             w: wtr,
-            // 16 KB hash table for matches, same as the reference implementation.
             compression_table: Some(HashTable4K::new()),
             content_hasher: XxHash32::with_seed(0),
             content_len: 0,
@@ -157,6 +159,8 @@ impl<W: io::Write> FrameEncoder<W> {
             src_stream_offset: 0,
             #[cfg(feature = "hc")]
             compression_level: 1,
+            #[cfg(feature = "hc")]
+            hc_table: None,
         }
     }
 
@@ -196,7 +200,6 @@ impl<W: io::Write> FrameEncoder<W> {
         // Level 2+: compress_hc (lz4mid for 2, HC for 3-9, optimal for 10-12)
         //           requires independent blocks
         if level == 1 {
-            // Level 1: fast algorithm with linked block support (like C)
             FrameEncoder {
                 src: Vec::new(),
                 w: wtr,
@@ -213,9 +216,9 @@ impl<W: io::Write> FrameEncoder<W> {
                 ext_dict_len: 0,
                 src_stream_offset: 0,
                 compression_level: level,
+                hc_table: None,
             }
         } else {
-            // Levels 2+: use compress_hc (requires independent blocks)
             frame_info.block_mode = BlockMode::Independent;
 
             FrameEncoder {
@@ -234,6 +237,7 @@ impl<W: io::Write> FrameEncoder<W> {
                 ext_dict_len: 0,
                 src_stream_offset: 0,
                 compression_level: level,
+                hc_table: Some(CompressTableHC::new()),
             }
         }
     }
@@ -404,14 +408,13 @@ impl<W: io::Write> FrameEncoder<W> {
         //   - Levels 10-12: optimal parsing
         #[cfg(feature = "hc")]
         let compress_result = if self.compression_table.is_some() {
-            // Fast algorithm with linked block support
             self.compress_block_fast(dst_required_size)
         } else {
-            // HC mode (independent blocks only)
-            compress_hc(
+            compress_hc_with_table(
                 &self.src[src_start..src_end],
                 &mut vec_sink_for_compression(&mut self.dst, 0, 0, dst_required_size),
                 self.compression_level,
+                self.hc_table.get_or_insert_with(CompressTableHC::new),
             )
         };
 

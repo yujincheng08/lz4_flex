@@ -210,7 +210,6 @@ impl HashTableHCU32 {
 
     /// Reset the table for reuse, re-zeroing both tables.
     /// Avoids reallocation if the existing chain table is large enough.
-    #[cfg(all(not(feature = "safe-encode"), feature = "std"))]
     #[inline]
     fn reset(&mut self, max_attempts: usize, input_len: usize) {
         let needed_chain_size = input_len
@@ -798,57 +797,50 @@ fn sequence_price(litlen: i32, mlen: i32) -> i32 {
     price
 }
 
-// Thread-local cached hash table to avoid per-call allocation overhead.
-// State stays in thread-local permanently; we just reset and borrow &mut.
-#[cfg(all(not(feature = "safe-encode"), feature = "std"))]
-std::thread_local! {
-    static CACHED_HT: core::cell::UnsafeCell<Option<HashTableHCU32>> = const { core::cell::UnsafeCell::new(None) };
+/// A reusable compression table for the HC algorithm that avoids re-allocating
+/// internal hash tables on every call.
+///
+/// This is useful when compressing many inputs in a loop (e.g. frame blocks).
+/// Create one table and pass it to [`compress_hc_with_table`] repeatedly.
+///
+/// The table automatically selects the right internal variant (mid vs HC)
+/// based on the compression level, upgrading transparently when needed.
+///
+/// # Example
+/// ```
+/// use lz4_flex::block::{compress_hc_to_vec_with_table, CompressTableHC};
+///
+/// let mut table = CompressTableHC::new();
+/// for input in [b"block one".as_slice(), b"block two".as_slice()] {
+///     let compressed = compress_hc_to_vec_with_table(input, 9, &mut table);
+/// }
+/// ```
+pub struct CompressTableHC {
+    inner: CompressTableHCInner,
 }
 
-/// Run `f` with a `&mut HashTableHCU32`, reusing thread-local cached state.
-#[cfg(all(not(feature = "safe-encode"), feature = "std"))]
-#[inline]
-fn with_hc_state<R>(max_attempts: usize, input_len: usize, f: impl FnOnce(&mut HashTableHCU32) -> R) -> R {
-    CACHED_HT.with(|cell| {
-        // SAFETY: thread_local! guarantees single-threaded access,
-        // and compress_hc never recurses.
-        let slot = unsafe { &mut *cell.get() };
-        let ht = match slot {
-            Some(ht) => { ht.reset(max_attempts, input_len); ht }
-            None => slot.insert(HashTableHCU32::new(max_attempts, input_len)),
-        };
-        f(ht)
-    })
+enum CompressTableHCInner {
+    Mid(HashTableMid),
+    HC(HashTableHCU32),
 }
 
-/// Fallback: allocate a fresh table per call (safe-encode or no-std).
-#[cfg(any(feature = "safe-encode", not(feature = "std")))]
-#[inline]
-fn with_hc_state<R>(max_attempts: usize, input_len: usize, f: impl FnOnce(&mut HashTableHCU32) -> R) -> R {
-    let mut ht = HashTableHCU32::new(max_attempts, input_len);
-    f(&mut ht)
+impl CompressTableHC {
+    /// Create a new table. The internal variant is lazily chosen on first use.
+    pub fn new() -> Self {
+        CompressTableHC { inner: CompressTableHCInner::Mid(HashTableMid::new()) }
+    }
 }
 
 /// Compress input data using the LZ4 high compression algorithm.
 ///
-/// This function provides better compression ratios than the standard LZ4 algorithm
-/// at the cost of compression speed. It automatically selects the best compression
-/// strategy based on the compression level:
+/// Allocates a fresh internal table on every call. For repeated compression
+/// (e.g. compressing many blocks in a loop), prefer [`compress_hc_with_table`]
+/// with a reusable [`CompressTableHC`] to avoid repeated allocation.
 ///
-/// - **Levels 1-9**: Uses the standard HC (Hash Chain) algorithm with increasing
-///   search depth for better compression.
-/// - **Levels 10-12**: Uses the optimal parsing algorithm which employs dynamic
-///   programming to find the best sequence of matches and literals for maximum
-///   compression. This is significantly slower but produces smaller output.
-///
-/// # Arguments
-/// * `input` - The input data to compress
-/// * `output` - The output buffer to write compressed data to
-/// * `level` - Compression level (1-12), higher means better compression but slower
-///
-/// # Returns
-/// * `Ok(usize)` - The number of bytes written to output
-/// * `Err(CompressError)` - If the output buffer is too small
+/// # Compression levels
+/// - **Levels 1-2**: lz4mid intermediate algorithm
+/// - **Levels 3-9**: HC hash chain algorithm with increasing search depth
+/// - **Levels 10-12**: Optimal parsing (dynamic programming) for maximum compression
 ///
 /// # Example
 /// ```ignore
@@ -859,30 +851,84 @@ fn with_hc_state<R>(max_attempts: usize, input_len: usize, f: impl FnOnce(&mut H
 /// let size = compress_hc(input, &mut output, 12).unwrap(); // Optimal algorithm
 /// ```
 pub fn compress_hc(input: &[u8], output: &mut impl Sink, level: u8) -> Result<usize, CompressError> {
-    // Clamp level to valid range (0-12, matching C LZ4HC)
     let level = level.min(12);
 
-    // Route to appropriate algorithm based on level (matching C LZ4HC k_clTable)
-    // Levels 0-2: lz4mid (intermediate - two hash tables, better than fast)
-    // Levels 3-9: HC (hash chain algorithm)
-    // Levels 10-12: optimal parsing (best compression)
     if level >= 10 {
         let nb_searches = match level {
             10 => 96,
             11 => 512,
             _ => 16384,
         };
-        with_hc_state(nb_searches, input.len(), |ht| {
-            compress_opt_internal(input, output, level, ht)
-        })
+        let mut ht = HashTableHCU32::new(nb_searches, input.len());
+        compress_opt_internal(input, output, level, &mut ht)
     } else if level >= 3 {
-        with_hc_state(1 << (level - 1), input.len(), |ht| {
-            compress_hc_internal(input, output, ht)
-        })
+        let mut ht = HashTableHCU32::new(1 << (level - 1), input.len());
+        compress_hc_internal(input, output, &mut ht)
     } else {
-        with_mid_state(|table| {
-            compress_mid_internal(input, output, table)
-        })
+        let mut table = HashTableMid::new();
+        compress_mid_internal(input, output, &mut table)
+    }
+}
+
+/// Compress input data using the LZ4 high compression algorithm, reusing a
+/// [`CompressTableHC`] to avoid re-allocating internal hash tables.
+///
+/// The table is automatically reset before each call. If the level changes
+/// between calls (e.g. mid vs HC), the table is transparently upgraded.
+///
+/// See [`compress_hc`] for compression level details.
+///
+/// # Example
+/// ```ignore
+/// use lz4_flex::block::{compress_hc_with_table, get_maximum_output_size, CompressTableHC};
+///
+/// let mut table = CompressTableHC::new();
+/// let input = b"Hello, this is some data to compress with HC!";
+/// let mut output = vec![0u8; get_maximum_output_size(input.len())];
+/// let n = compress_hc_with_table(input, &mut output, 9, &mut table).unwrap();
+/// ```
+pub fn compress_hc_with_table(input: &[u8], output: &mut impl Sink, level: u8, table: &mut CompressTableHC) -> Result<usize, CompressError> {
+    let level = level.min(12);
+
+    if level >= 3 {
+        let max_attempts = if level >= 10 {
+            match level {
+                10 => 96,
+                11 => 512,
+                _ => 16384,
+            }
+        } else {
+            1 << (level - 1)
+        };
+
+        let ht = match &mut table.inner {
+            CompressTableHCInner::HC(ht) => {
+                ht.reset(max_attempts, input.len());
+                ht
+            }
+            _ => {
+                table.inner = CompressTableHCInner::HC(HashTableHCU32::new(max_attempts, input.len()));
+                match &mut table.inner { CompressTableHCInner::HC(ht) => ht, _ => unreachable!() }
+            }
+        };
+
+        if level >= 10 {
+            compress_opt_internal(input, output, level, ht)
+        } else {
+            compress_hc_internal(input, output, ht)
+        }
+    } else {
+        let mid = match &mut table.inner {
+            CompressTableHCInner::Mid(mid) => {
+                mid.reset();
+                mid
+            }
+            _ => {
+                table.inner = CompressTableHCInner::Mid(HashTableMid::new());
+                match &mut table.inner { CompressTableHCInner::Mid(mid) => mid, _ => unreachable!() }
+            }
+        };
+        compress_mid_internal(input, output, mid)
     }
 }
 
@@ -925,6 +971,39 @@ pub fn compress_hc_to_vec(input: &[u8], level: u8) -> Vec<u8> {
     }
 }
 
+/// Compress input data using the LZ4 high compression algorithm, returning a Vec
+/// and reusing a [`CompressTableHC`].
+///
+/// This is the reusable-table variant of [`compress_hc_to_vec`]. See
+/// [`compress_hc_with_table`] for details on table reuse.
+///
+/// # Example
+/// ```
+/// use lz4_flex::block::{compress_hc_to_vec_with_table, CompressTableHC};
+///
+/// let mut table = CompressTableHC::new();
+/// let compressed = compress_hc_to_vec_with_table(b"data to compress", 9, &mut table);
+/// ```
+pub fn compress_hc_to_vec_with_table(input: &[u8], level: u8, table: &mut CompressTableHC) -> Vec<u8> {
+    let max_size = crate::block::compress::get_maximum_output_size(input.len());
+    #[cfg(feature = "safe-encode")]
+    {
+        let mut output = vec![0u8; max_size];
+        let mut sink = SliceSink::new(&mut output, 0);
+        let compressed_size = compress_hc_with_table(input, &mut sink, level, table).unwrap();
+        output.truncate(compressed_size);
+        output
+    }
+    #[cfg(not(feature = "safe-encode"))]
+    {
+        let mut output = Vec::with_capacity(max_size);
+        let compressed_size = compress_hc_with_table(input, &mut PtrSink::from_vec(&mut output, 0), level, table).unwrap();
+        unsafe { output.set_len(compressed_size); }
+        output.shrink_to_fit();
+        output
+    }
+}
+
 // ============================================================================
 // LZ4MID - Intermediate compression (levels 1-2)
 // Uses two hash tables (4-byte and 8-byte) for better compression than fast
@@ -932,7 +1011,7 @@ pub fn compress_hc_to_vec(input: &[u8], level: u8) -> Vec<u8> {
 // ============================================================================
 
 /// Hash table for lz4mid algorithm - contains two tables (4-byte and 8-byte)
-struct HashTableMid {
+pub(crate) struct HashTableMid {
     hash4: Box<[u32; LZ4MID_HASHTABLE_SIZE]>,
     hash8: Box<[u32; LZ4MID_HASHTABLE_SIZE]>,
 }
@@ -946,43 +1025,10 @@ impl HashTableMid {
     }
 
     /// Reset the table for reuse by zeroing both hash tables.
-    #[cfg(all(not(feature = "safe-encode"), feature = "std"))]
     fn reset(&mut self) {
-        unsafe {
-            core::ptr::write_bytes(self.hash4.as_mut_ptr(), 0, LZ4MID_HASHTABLE_SIZE);
-            core::ptr::write_bytes(self.hash8.as_mut_ptr(), 0, LZ4MID_HASHTABLE_SIZE);
-        }
+        self.hash4.fill(0);
+        self.hash8.fill(0);
     }
-}
-
-// Thread-local cached hash table for lz4mid to avoid per-call allocation.
-#[cfg(all(not(feature = "safe-encode"), feature = "std"))]
-std::thread_local! {
-    static CACHED_HT_MID: core::cell::UnsafeCell<Option<HashTableMid>> = const { core::cell::UnsafeCell::new(None) };
-}
-
-/// Run `f` with a `&mut HashTableMid`, reusing thread-local cached state.
-#[cfg(all(not(feature = "safe-encode"), feature = "std"))]
-#[inline]
-fn with_mid_state<R>(f: impl FnOnce(&mut HashTableMid) -> R) -> R {
-    CACHED_HT_MID.with(|cell| {
-        // SAFETY: thread_local! guarantees single-threaded access,
-        // and compress_hc never recurses.
-        let slot = unsafe { &mut *cell.get() };
-        let ht = match slot {
-            Some(ht) => { ht.reset(); ht }
-            None => slot.insert(HashTableMid::new()),
-        };
-        f(ht)
-    })
-}
-
-/// Fallback: allocate a fresh table per call (safe-encode or no-std).
-#[cfg(any(feature = "safe-encode", not(feature = "std")))]
-#[inline]
-fn with_mid_state<R>(f: impl FnOnce(&mut HashTableMid) -> R) -> R {
-    let mut ht = HashTableMid::new();
-    f(&mut ht)
 }
 
 /// 4-byte hash for lz4mid (same multiplier as fast algorithm)
