@@ -241,9 +241,6 @@ impl HashTableHCU32 {
     #[inline(always)]
     fn next(&self, pos: usize) -> usize {
         let idx = pos & self.chain_mask();
-        // SAFETY: chain_table.len() is a power of 2, so idx = pos & (len - 1) < len.
-        #[cfg(not(feature = "safe-encode"))]
-        unsafe { core::hint::assert_unchecked(idx < self.chain_table.len()); }
         pos - (self.chain_table[idx] as usize)
     }
 
@@ -251,22 +248,12 @@ impl HashTableHCU32 {
     #[inline(always)]
     fn chain_delta(&self, pos: usize) -> u16 {
         let idx = pos & self.chain_mask();
-        // SAFETY: chain_table.len() is a power of 2, so idx = pos & (len - 1) < len.
-        #[cfg(not(feature = "safe-encode"))]
-        unsafe { core::hint::assert_unchecked(idx < self.chain_table.len()); }
         self.chain_table[idx]
     }
 
     #[inline(always)]
     fn add_hash(&mut self, hash: usize, pos: usize) {
         let chain_idx = pos & self.chain_mask();
-        // SAFETY: hash comes from hash_hc (u32 >> 17), so hash < 2^15 = HC_DICT_SIZE = dict.len().
-        // chain_idx = pos & (chain_table.len() - 1) < chain_table.len() (power-of-2 mask).
-        #[cfg(not(feature = "safe-encode"))]
-        unsafe {
-            core::hint::assert_unchecked(hash < self.dict.len());
-            core::hint::assert_unchecked(chain_idx < self.chain_table.len());
-        }
         let delta = pos - self.dict[hash] as usize;
         let delta = if delta > self.chain_mask() {
             self.chain_mask()
@@ -280,18 +267,12 @@ impl HashTableHCU32 {
     /// Get dict value at hash position
     #[inline(always)]
     fn get_dict(&self, hash: usize) -> usize {
-        // SAFETY: hash comes from hash_hc (u32 >> 17), so hash < 2^15 = dict.len().
-        #[cfg(not(feature = "safe-encode"))]
-        unsafe { core::hint::assert_unchecked(hash < self.dict.len()); }
         self.dict[hash] as usize
     }
 
     /// Set dict value at hash position
     #[inline(always)]
     fn set_dict(&mut self, hash: usize, pos: usize) {
-        // SAFETY: hash comes from hash_hc (u32 >> 17), so hash < 2^15 = dict.len().
-        #[cfg(not(feature = "safe-encode"))]
-        unsafe { core::hint::assert_unchecked(hash < self.dict.len()); }
         self.dict[hash] = pos as u32;
     }
 
@@ -299,9 +280,6 @@ impl HashTableHCU32 {
     #[inline(always)]
     fn set_chain(&mut self, pos: usize, delta: u16) {
         let idx = pos & self.chain_mask();
-        // SAFETY: chain_table.len() is a power of 2, so idx = pos & (len - 1) < len.
-        #[cfg(not(feature = "safe-encode"))]
-        unsafe { core::hint::assert_unchecked(idx < self.chain_table.len()); }
         self.chain_table[idx] = delta;
     }
 
@@ -350,15 +328,6 @@ impl HashTableHCU32 {
             // This avoids expensive full comparisons for candidates that can't be longer (like C's LZ4_read16 check)
             if match_info.len >= MIN_MATCH as u32 {
                 let check_pos = match_info.len as usize - 1;
-                // SAFETY: match_info.len <= match_limit - off (bounded by common_bytes forward limit),
-                // and ref_pos < off (checked above), so:
-                //   off + check_pos + 1 = off + match_info.len <= match_limit < input.len()
-                //   ref_pos + check_pos + 1 < off + match_info.len <= match_limit < input.len()
-                #[cfg(not(feature = "safe-encode"))]
-                unsafe {
-                    core::hint::assert_unchecked(off + check_pos + 1 < input.len());
-                    core::hint::assert_unchecked(ref_pos + check_pos + 1 < input.len());
-                }
                 if input[ref_pos + check_pos] != input[off + check_pos]
                     || input[ref_pos + check_pos + 1] != input[off + check_pos + 1]
                 {
@@ -443,15 +412,6 @@ impl HashTableHCU32 {
             if match_info.len >= MIN_MATCH as u32 && ref_pos >= look_back_length {
                 let src_check = start_limit + match_info.len as usize - 1;
                 let match_check = ref_pos - look_back_length + match_info.len as usize - 1;
-                // SAFETY: match_info.len <= match_limit - start_limit (bounded by forward + backward),
-                // so src_check + 1 = start_limit + match_info.len <= match_limit < input.len().
-                // ref_pos < off, so match_check + 1 = ref_pos - look_back_length + match_info.len
-                //   < off - look_back_length + match_limit - start_limit = match_limit < input.len().
-                #[cfg(not(feature = "safe-encode"))]
-                unsafe {
-                    core::hint::assert_unchecked(src_check + 1 < input.len());
-                    core::hint::assert_unchecked(match_check + 1 < input.len());
-                }
                 if input[src_check] != input[match_check]
                     || input[src_check + 1] != input[match_check + 1]
                 {
@@ -511,15 +471,6 @@ impl HashTableHCU32 {
             return 0;
         }
 
-        // SAFETY: pos1 and pos2 are valid positions in input (< input.len()),
-        // and max_back <= pos1 - limit1, so pos1 - max_back >= limit1 >= 0.
-        // After batch loop, pos1/pos2 only decrease but stay >= limit1/limit2.
-        #[cfg(not(feature = "safe-encode"))]
-        unsafe {
-            core::hint::assert_unchecked(pos1 < input.len());
-            core::hint::assert_unchecked(pos2 < input.len());
-        }
-        
         // Process usize (8 bytes on 64-bit) at a time, backwards
         const STEP_SIZE: usize = core::mem::size_of::<usize>();
         while len + STEP_SIZE <= max_back {
@@ -607,15 +558,6 @@ impl HashTableHCU32 {
             // of the best match are present in the candidate before doing full comparison.
             let pre_check_ok = if best_len >= MIN_MATCH {
                 let check_pos = best_len - 1;
-                // SAFETY: best_len <= match_limit - off (bounded by common_bytes forward limit),
-                // and ref_pos < off (checked above), so:
-                //   off + check_pos + 1 = off + best_len <= match_limit < input.len()
-                //   ref_pos + check_pos + 1 < off + best_len <= match_limit < input.len()
-                #[cfg(not(feature = "safe-encode"))]
-                unsafe {
-                    core::hint::assert_unchecked(off + check_pos + 1 < input.len());
-                    core::hint::assert_unchecked(ref_pos + check_pos + 1 < input.len());
-                }
                 // Use a single 2-byte (u16) read instead of two separate byte comparisons,
                 // matching C's LZ4_read16 pattern for better codegen
                 #[cfg(not(feature = "safe-encode"))]
@@ -1080,9 +1022,6 @@ fn compress_mid_internal(input: &[u8], output: &mut impl Sink, table: &mut HashT
     fn add_hash8(hash8: &mut [u32; LZ4MID_HASHTABLE_SIZE], input: &[u8], pos: usize, input_end: usize) {
         if pos + 8 <= input_end {
             let h = get_hash8_mid(input, pos);
-            // SAFETY: hash is computed via >> (64 - LZ4MID_HASH_LOG), so h < LZ4MID_HASHTABLE_SIZE.
-            #[cfg(not(feature = "safe-encode"))]
-            unsafe { core::hint::assert_unchecked(h < hash8.len()); }
             hash8[h] = pos as u32;
         }
     }
@@ -1092,9 +1031,6 @@ fn compress_mid_internal(input: &[u8], output: &mut impl Sink, table: &mut HashT
     fn add_hash4(hash4: &mut [u32; LZ4MID_HASHTABLE_SIZE], input: &[u8], pos: usize, input_end: usize) {
         if pos + 4 <= input_end {
             let h = get_hash4_mid(input, pos);
-            // SAFETY: hash is computed via >> (32 - LZ4MID_HASH_LOG), so h < LZ4MID_HASHTABLE_SIZE.
-            #[cfg(not(feature = "safe-encode"))]
-            unsafe { core::hint::assert_unchecked(h < hash4.len()); }
             hash4[h] = pos as u32;
         }
     }
@@ -1102,9 +1038,6 @@ fn compress_mid_internal(input: &[u8], output: &mut impl Sink, table: &mut HashT
     while ip <= mflimit {
         // Try 8-byte hash first (longer matches)
         let h8 = get_hash8_mid(input, ip);
-        // SAFETY: h8 < LZ4MID_HASHTABLE_SIZE (hash shift guarantees this).
-        #[cfg(not(feature = "safe-encode"))]
-        unsafe { core::hint::assert_unchecked(h8 < hash8.len()); }
         let pos8 = hash8[h8] as usize;
         hash8[h8] = ip as u32;
 
@@ -1149,9 +1082,6 @@ fn compress_mid_internal(input: &[u8], output: &mut impl Sink, table: &mut HashT
 
         // Try 4-byte hash (shorter matches)
         let h4 = get_hash4_mid(input, ip);
-        // SAFETY: h4 < LZ4MID_HASHTABLE_SIZE (hash shift guarantees this).
-        #[cfg(not(feature = "safe-encode"))]
-        unsafe { core::hint::assert_unchecked(h4 < hash4.len()); }
         let pos4 = hash4[h4] as usize;
         hash4[h4] = ip as u32;
 
@@ -1166,9 +1096,6 @@ fn compress_mid_internal(input: &[u8], output: &mut impl Sink, table: &mut HashT
 
                 if ip + 1 <= mflimit {
                     let h8_next = get_hash8_mid(input, ip + 1);
-                    // SAFETY: h8_next < LZ4MID_HASHTABLE_SIZE (hash shift guarantees this).
-                    #[cfg(not(feature = "safe-encode"))]
-                    unsafe { core::hint::assert_unchecked(h8_next < hash8.len()); }
                     let pos8_next = hash8[h8_next] as usize;
                     if ip + 1 > pos8_next && ip + 1 - pos8_next <= MAX_DISTANCE {
                         let mut probe_next = ip + 1;
@@ -1493,15 +1420,6 @@ fn compress_opt_internal(input: &[u8], output: &mut impl Sink, level: u8, ht: &m
                 break;
             }
 
-            // SAFETY: cur < last_match_pos < LZ4_OPT_NUM, so:
-            //   cur + MIN_MATCH <= LZ4_OPT_NUM + MIN_MATCH - 2 < opt.len() (= LZ4_OPT_NUM + TRAILING_LITERALS)
-            //   since MIN_MATCH(4) - 2 = 2 < TRAILING_LITERALS(3)
-            #[cfg(not(feature = "safe-encode"))]
-            unsafe {
-                core::hint::assert_unchecked(cur + MIN_MATCH < opt.len());
-                core::hint::assert_unchecked(last_match_pos + TRAILING_LITERALS < opt.len());
-            }
-
             if full_update {
                 // Not useful to search here if next position has same (or lower) cost
                 if opt[cur + 1].price <= opt[cur].price
@@ -1588,9 +1506,6 @@ fn compress_opt_internal(input: &[u8], output: &mut impl Sink, level: u8, ht: &m
                 let base_litlen = opt[cur].litlen;
                 for litlen in 1..MIN_MATCH as i32 {
                     let pos = cur + litlen as usize;
-                    // SAFETY: pos = cur + litlen < cur + MIN_MATCH < opt.len() (asserted above)
-                    #[cfg(not(feature = "safe-encode"))]
-                    unsafe { core::hint::assert_unchecked(pos < opt.len()); }
                     let price = opt[cur].price - literals_price(base_litlen) + literals_price(base_litlen + litlen);
                     if price < opt[pos].price {
                         opt[pos].mlen = 1; // literal
@@ -1604,12 +1519,8 @@ fn compress_opt_internal(input: &[u8], output: &mut impl Sink, level: u8, ht: &m
             // Set prices using match at current position
             {
                 let match_ml = new_len.min(LZ4_OPT_NUM - cur - 1);
-                // SAFETY: pos = cur + ml <= cur + LZ4_OPT_NUM - cur - 1 = LZ4_OPT_NUM - 1 < opt.len()
                 for ml in MIN_MATCH..=match_ml {
                     let pos = cur + ml;
-                    #[cfg(not(feature = "safe-encode"))]
-                    unsafe { core::hint::assert_unchecked(pos < opt.len()); }
-
                     let (ll, price) = if opt[cur].mlen == 1 {
                         let ll = opt[cur].litlen;
                         let base_price = if cur as i32 > ll { opt[cur - ll as usize].price } else { 0 };
@@ -1631,11 +1542,8 @@ fn compress_opt_internal(input: &[u8], output: &mut impl Sink, level: u8, ht: &m
             }
 
             // Complete following positions with literals
-            // SAFETY: pos = last_match_pos + add_lit <= last_match_pos + TRAILING_LITERALS < opt.len()
             for add_lit in 1..=TRAILING_LITERALS as i32 {
                 let pos = last_match_pos + add_lit as usize;
-                #[cfg(not(feature = "safe-encode"))]
-                unsafe { core::hint::assert_unchecked(pos < opt.len()); }
                 opt[pos].mlen = 1; // literal
                 opt[pos].off = 0;
                 opt[pos].litlen = add_lit;
