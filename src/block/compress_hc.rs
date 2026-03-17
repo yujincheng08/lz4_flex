@@ -7,15 +7,18 @@
 //! - `compress_hc`: The standard high compression algorithm (levels 3-9)
 //! - `compress_opt`: The optimal parsing algorithm for maximum compression (levels 10-12)
 
-use crate::block::{encode_sequence, handle_last_literals, CompressError, END_OFFSET, LAST_LITERALS, MFLIMIT, MINMATCH, MAX_DISTANCE};
 use crate::block::compress::{backtrack_match, count_same_bytes};
+#[cfg(test)]
+use crate::block::decompress;
+use crate::block::{
+    encode_sequence, handle_last_literals, CompressError, END_OFFSET, LAST_LITERALS, MAX_DISTANCE,
+    MFLIMIT, MINMATCH,
+};
+#[cfg(not(feature = "safe-encode"))]
+use crate::sink::PtrSink;
 use crate::sink::Sink;
 #[cfg(feature = "safe-encode")]
 use crate::sink::SliceSink;
-#[cfg(not(feature = "safe-encode"))]
-use crate::sink::PtrSink;
-#[cfg(test)]
-use crate::block::decompress;
 #[allow(unused_imports)]
 use alloc::boxed::Box;
 #[allow(unused_imports)]
@@ -114,7 +117,7 @@ impl Match {
             &input[anchor..self.start as usize],
             output,
             self.offset(),
-            self.len as usize - MIN_MATCH
+            self.len as usize - MIN_MATCH,
         )
     }
 }
@@ -192,14 +195,11 @@ impl HashTableHCU32 {
             .into_boxed_slice()
             .try_into()
             .unwrap();
-        
+
         // Chain table: dynamically sized based on input length
         // min(input_len, MAX_DISTANCE_HC), at least 256, must be power of 2
-        let chain_size = input_len
-            .min(MAX_DISTANCE_HC)
-            .max(256)
-            .next_power_of_two();
-        
+        let chain_size = input_len.min(MAX_DISTANCE_HC).max(256).next_power_of_two();
+
         Self {
             dict,
             chain_table: vec![0u16; chain_size].into_boxed_slice(),
@@ -212,10 +212,7 @@ impl HashTableHCU32 {
     /// Avoids reallocation if the existing chain table is large enough.
     #[inline]
     fn reset(&mut self, max_attempts: usize, input_len: usize) {
-        let needed_chain_size = input_len
-            .min(MAX_DISTANCE_HC)
-            .max(256)
-            .next_power_of_two();
+        let needed_chain_size = input_len.min(MAX_DISTANCE_HC).max(256).next_power_of_two();
 
         self.dict.fill(0);
 
@@ -229,13 +226,12 @@ impl HashTableHCU32 {
         self.next_to_update = 0;
         self.max_attempts = max_attempts;
     }
-    
+
     /// Mask for chain table indexing (table size is always power of 2)
     #[inline]
     fn chain_mask(&self) -> usize {
         self.chain_table.len() - 1
     }
-
 
     /// Get the next position in the chain for a given offset
     #[inline(always)]
@@ -304,7 +300,13 @@ impl HashTableHCU32 {
         self.next_to_update = off;
     }
 
-    fn insert_and_find_best_match(&mut self, input: &[u8], off: u32, match_limit: u32, match_info: &mut Match) -> bool {
+    fn insert_and_find_best_match(
+        &mut self,
+        input: &[u8],
+        off: u32,
+        match_limit: u32,
+        match_info: &mut Match,
+    ) -> bool {
         match_info.start = off;
         match_info.len = 0;
         let mut delta: usize = 0;
@@ -323,7 +325,7 @@ impl HashTableHCU32 {
             if ref_pos >= off || off - ref_pos > self.chain_mask() {
                 break;
             }
-            
+
             // Early termination: if we already have a match, check if the last 2 bytes match first
             // This avoids expensive full comparisons for candidates that can't be longer (like C's LZ4_read16 check)
             if match_info.len >= MIN_MATCH as u32 {
@@ -339,9 +341,10 @@ impl HashTableHCU32 {
                     continue;
                 }
             }
-            
+
             if self.read_min_match_equals(input, ref_pos, off) {
-                let match_len = MIN_MATCH + self.common_bytes(input, ref_pos + MIN_MATCH, off + MIN_MATCH, match_limit);
+                let match_len = MIN_MATCH
+                    + self.common_bytes(input, ref_pos + MIN_MATCH, off + MIN_MATCH, match_limit);
                 if match_len as u32 > match_info.len {
                     match_info.ref_pos = ref_pos as u32;
                     match_info.len = match_len as u32;
@@ -363,7 +366,7 @@ impl HashTableHCU32 {
         if repl != 0 {
             let mut ptr = off;
             let end = off + repl - 3; // MIN_MATCH - 1 = 3
-            // possible overlap from off -> ref
+                                      // possible overlap from off -> ref
             while ptr < end - delta {
                 self.set_chain(ptr, delta as u16); // pre load
                 ptr += 1;
@@ -384,9 +387,17 @@ impl HashTableHCU32 {
     }
 
     /// Insert hashes and find a wider match, similar to Java insertAndFindWiderMatch
-    pub fn insert_and_find_wider_match(&mut self, input: &[u8], off: u32, start_limit: u32, match_limit: u32, min_len: u32, match_info: &mut Match) -> bool {
+    pub fn insert_and_find_wider_match(
+        &mut self,
+        input: &[u8],
+        off: u32,
+        start_limit: u32,
+        match_limit: u32,
+        min_len: u32,
+        match_info: &mut Match,
+    ) -> bool {
         match_info.len = min_len;
-        
+
         let off = off as usize;
         let start_limit = start_limit as usize;
         let match_limit = match_limit as usize;
@@ -403,7 +414,7 @@ impl HashTableHCU32 {
             if ref_pos >= off || off - ref_pos > self.chain_mask() {
                 break;
             }
-            
+
             // Early termination: check if last 2 bytes of current best match also match
             // C uses: LZ4_read16(iLowLimit + longest - 1) == LZ4_read16(matchPtr - lookBackLength + longest - 1)
             // iLowLimit = start_limit, matchPtr = ref_pos, so we check:
@@ -423,10 +434,12 @@ impl HashTableHCU32 {
                     continue;
                 }
             }
-            
+
             if self.read_min_match_equals(input, ref_pos, off) {
-                let match_len_forward = MIN_MATCH + self.common_bytes(input, ref_pos + MIN_MATCH, off + MIN_MATCH, match_limit);
-                let match_len_backward = Self::common_bytes_backward(input, ref_pos, off, 0, start_limit);
+                let match_len_forward = MIN_MATCH
+                    + self.common_bytes(input, ref_pos + MIN_MATCH, off + MIN_MATCH, match_limit);
+                let match_len_backward =
+                    Self::common_bytes_backward(input, ref_pos, off, 0, start_limit);
                 let match_len = (match_len_backward + match_len_forward) as u32;
 
                 if match_len > match_info.len {
@@ -463,10 +476,16 @@ impl HashTableHCU32 {
 
     /// Find the number of common bytes backward from two positions (optimized)
     #[inline]
-    fn common_bytes_backward(input: &[u8], mut pos1: usize, mut pos2: usize, limit1: usize, limit2: usize) -> usize {
+    fn common_bytes_backward(
+        input: &[u8],
+        mut pos1: usize,
+        mut pos2: usize,
+        limit1: usize,
+        limit2: usize,
+    ) -> usize {
         let mut len = 0;
         let max_back = (pos1 - limit1).min(pos2 - limit2);
-        
+
         if max_back == 0 {
             return 0;
         }
@@ -477,7 +496,7 @@ impl HashTableHCU32 {
             let v1 = super::compress::get_batch_arch(input, pos1 - len - STEP_SIZE);
             let v2 = super::compress::get_batch_arch(input, pos2 - len - STEP_SIZE);
             let diff = v1 ^ v2;
-            
+
             if diff == 0 {
                 len += STEP_SIZE;
             } else {
@@ -485,11 +504,11 @@ impl HashTableHCU32 {
                 return len + (diff.to_be().trailing_zeros() / 8) as usize;
             }
         }
-        
+
         // Update positions to account for bytes already compared in batch loop
         pos1 -= len;
         pos2 -= len;
-        
+
         // Process remaining 4 bytes if on 64-bit
         #[cfg(target_pointer_width = "64")]
         if len + 4 <= max_back {
@@ -522,7 +541,7 @@ impl HashTableHCU32 {
         if len < max_back && input[pos1 - 1] == input[pos2 - 1] {
             len += 1;
         }
-        
+
         len
     }
 
@@ -530,7 +549,13 @@ impl HashTableHCU32 {
     /// Uses u32 params to reduce call overhead (LZ4 block max is ~2GB).
     /// Offset is u16 since LZ4 format limits distance to 16 bits.
     #[inline]
-    pub fn find_longer_match(&mut self, input: &[u8], off: u32, match_limit: u32, min_len: u32) -> (u32, u16) {
+    pub fn find_longer_match(
+        &mut self,
+        input: &[u8],
+        off: u32,
+        match_limit: u32,
+        min_len: u32,
+    ) -> (u32, u16) {
         self.insert(off, input);
 
         let off = off as usize;
@@ -566,14 +591,17 @@ impl HashTableHCU32 {
                         == (input.as_ptr().add(off + check_pos) as *const u16).read_unaligned()
                 }
                 #[cfg(feature = "safe-encode")]
-                { input[ref_pos + check_pos] == input[off + check_pos]
-                    && input[ref_pos + check_pos + 1] == input[off + check_pos + 1] }
+                {
+                    input[ref_pos + check_pos] == input[off + check_pos]
+                        && input[ref_pos + check_pos + 1] == input[off + check_pos + 1]
+                }
             } else {
                 true
             };
 
             if pre_check_ok && self.read_min_match_equals(input, ref_pos, off) {
-                match_len = MIN_MATCH + self.common_bytes(input, ref_pos + MIN_MATCH, off + MIN_MATCH, match_limit);
+                match_len = MIN_MATCH
+                    + self.common_bytes(input, ref_pos + MIN_MATCH, off + MIN_MATCH, match_limit);
                 if match_len > best_len {
                     best_len = match_len;
                     best_offset = (off - ref_pos) as u16;
@@ -619,7 +647,8 @@ impl HashTableHCU32 {
                             && (pattern & 0xFF) == (pattern >> 24)
                         {
                             repeat = 1; // confirmed
-                            src_pattern_length = count_pattern(input, off + 4, match_limit, pattern) + 4;
+                            src_pattern_length =
+                                count_pattern(input, off + 4, match_limit, pattern) + 4;
                         } else {
                             repeat = 2; // not a pattern
                         }
@@ -769,7 +798,9 @@ enum CompressTableHCInner {
 impl CompressTableHC {
     /// Create a new table. The internal variant is lazily chosen on first use.
     pub fn new() -> Self {
-        CompressTableHC { inner: CompressTableHCInner::Mid(HashTableMid::new()) }
+        CompressTableHC {
+            inner: CompressTableHCInner::Mid(HashTableMid::new()),
+        }
     }
 }
 
@@ -792,7 +823,11 @@ impl CompressTableHC {
 /// let size = compress_hc(input, &mut output, 9).unwrap(); // HC algorithm
 /// let size = compress_hc(input, &mut output, 12).unwrap(); // Optimal algorithm
 /// ```
-pub fn compress_hc(input: &[u8], output: &mut impl Sink, level: u8) -> Result<usize, CompressError> {
+pub fn compress_hc(
+    input: &[u8],
+    output: &mut impl Sink,
+    level: u8,
+) -> Result<usize, CompressError> {
     let level = level.min(12);
 
     if level >= 10 {
@@ -829,7 +864,12 @@ pub fn compress_hc(input: &[u8], output: &mut impl Sink, level: u8) -> Result<us
 /// let mut output = vec![0u8; get_maximum_output_size(input.len())];
 /// let n = compress_hc_with_table(input, &mut output, 9, &mut table).unwrap();
 /// ```
-pub fn compress_hc_with_table(input: &[u8], output: &mut impl Sink, level: u8, table: &mut CompressTableHC) -> Result<usize, CompressError> {
+pub fn compress_hc_with_table(
+    input: &[u8],
+    output: &mut impl Sink,
+    level: u8,
+    table: &mut CompressTableHC,
+) -> Result<usize, CompressError> {
     let level = level.min(12);
 
     if level >= 3 {
@@ -849,8 +889,12 @@ pub fn compress_hc_with_table(input: &[u8], output: &mut impl Sink, level: u8, t
                 ht
             }
             _ => {
-                table.inner = CompressTableHCInner::HC(HashTableHCU32::new(max_attempts, input.len()));
-                match &mut table.inner { CompressTableHCInner::HC(ht) => ht, _ => unreachable!() }
+                table.inner =
+                    CompressTableHCInner::HC(HashTableHCU32::new(max_attempts, input.len()));
+                match &mut table.inner {
+                    CompressTableHCInner::HC(ht) => ht,
+                    _ => unreachable!(),
+                }
             }
         };
 
@@ -867,7 +911,10 @@ pub fn compress_hc_with_table(input: &[u8], output: &mut impl Sink, level: u8, t
             }
             _ => {
                 table.inner = CompressTableHCInner::Mid(HashTableMid::new());
-                match &mut table.inner { CompressTableHCInner::Mid(mid) => mid, _ => unreachable!() }
+                match &mut table.inner {
+                    CompressTableHCInner::Mid(mid) => mid,
+                    _ => unreachable!(),
+                }
             }
         };
         compress_mid_internal(input, output, mid)
@@ -906,8 +953,11 @@ pub fn compress_hc_to_vec(input: &[u8], level: u8) -> Vec<u8> {
     #[cfg(not(feature = "safe-encode"))]
     {
         let mut output = Vec::with_capacity(max_size);
-        let compressed_size = compress_hc(input, &mut PtrSink::from_vec(&mut output, 0), level).unwrap();
-        unsafe { output.set_len(compressed_size); }
+        let compressed_size =
+            compress_hc(input, &mut PtrSink::from_vec(&mut output, 0), level).unwrap();
+        unsafe {
+            output.set_len(compressed_size);
+        }
         output.shrink_to_fit();
         output
     }
@@ -926,7 +976,11 @@ pub fn compress_hc_to_vec(input: &[u8], level: u8) -> Vec<u8> {
 /// let mut table = CompressTableHC::new();
 /// let compressed = compress_hc_to_vec_with_table(b"data to compress", 9, &mut table);
 /// ```
-pub fn compress_hc_to_vec_with_table(input: &[u8], level: u8, table: &mut CompressTableHC) -> Vec<u8> {
+pub fn compress_hc_to_vec_with_table(
+    input: &[u8],
+    level: u8,
+    table: &mut CompressTableHC,
+) -> Vec<u8> {
     let max_size = crate::block::compress::get_maximum_output_size(input.len());
     #[cfg(feature = "safe-encode")]
     {
@@ -939,8 +993,12 @@ pub fn compress_hc_to_vec_with_table(input: &[u8], level: u8, table: &mut Compre
     #[cfg(not(feature = "safe-encode"))]
     {
         let mut output = Vec::with_capacity(max_size);
-        let compressed_size = compress_hc_with_table(input, &mut PtrSink::from_vec(&mut output, 0), level, table).unwrap();
-        unsafe { output.set_len(compressed_size); }
+        let compressed_size =
+            compress_hc_with_table(input, &mut PtrSink::from_vec(&mut output, 0), level, table)
+                .unwrap();
+        unsafe {
+            output.set_len(compressed_size);
+        }
         output.shrink_to_fit();
         output
     }
@@ -961,8 +1019,14 @@ pub(crate) struct HashTableMid {
 impl HashTableMid {
     fn new() -> Self {
         HashTableMid {
-            hash4: vec![0u32; LZ4MID_HASHTABLE_SIZE].into_boxed_slice().try_into().unwrap(),
-            hash8: vec![0u32; LZ4MID_HASHTABLE_SIZE].into_boxed_slice().try_into().unwrap(),
+            hash4: vec![0u32; LZ4MID_HASHTABLE_SIZE]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap(),
+            hash8: vec![0u32; LZ4MID_HASHTABLE_SIZE]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap(),
         }
     }
 
@@ -1000,9 +1064,13 @@ fn get_hash8_mid(input: &[u8], pos: usize) -> usize {
 }
 
 /// Internal lz4mid compression
-fn compress_mid_internal(input: &[u8], output: &mut impl Sink, table: &mut HashTableMid) -> Result<usize, CompressError> {
+fn compress_mid_internal(
+    input: &[u8],
+    output: &mut impl Sink,
+    table: &mut HashTableMid,
+) -> Result<usize, CompressError> {
     let output_start = output.pos();
-    
+
     if input.len() < MFLIMIT + 1 {
         handle_last_literals(output, input);
         return Ok(output.pos() - output_start);
@@ -1019,7 +1087,12 @@ fn compress_mid_internal(input: &[u8], output: &mut impl Sink, table: &mut HashT
 
     // Helper to add position to hash8 table
     #[inline(always)]
-    fn add_hash8(hash8: &mut [u32; LZ4MID_HASHTABLE_SIZE], input: &[u8], pos: usize, input_end: usize) {
+    fn add_hash8(
+        hash8: &mut [u32; LZ4MID_HASHTABLE_SIZE],
+        input: &[u8],
+        pos: usize,
+        input_end: usize,
+    ) {
         if pos + 8 <= input_end {
             let h = get_hash8_mid(input, pos);
             hash8[h] = pos as u32;
@@ -1028,7 +1101,12 @@ fn compress_mid_internal(input: &[u8], output: &mut impl Sink, table: &mut HashT
 
     // Helper to add position to hash4 table
     #[inline(always)]
-    fn add_hash4(hash4: &mut [u32; LZ4MID_HASHTABLE_SIZE], input: &[u8], pos: usize, input_end: usize) {
+    fn add_hash4(
+        hash4: &mut [u32; LZ4MID_HASHTABLE_SIZE],
+        input: &[u8],
+        pos: usize,
+        input_end: usize,
+    ) {
         if pos + 4 <= input_end {
             let h = get_hash4_mid(input, pos);
             hash4[h] = pos as u32;
@@ -1043,12 +1121,14 @@ fn compress_mid_internal(input: &[u8], output: &mut impl Sink, table: &mut HashT
 
         if ip > pos8 && ip - pos8 <= MAX_DISTANCE {
             let mut probe = ip;
-            let match_len = count_same_bytes(input, &mut probe, input, pos8, input.len() - END_OFFSET);
+            let match_len =
+                count_same_bytes(input, &mut probe, input, pos8, input.len() - END_OFFSET);
             if match_len >= MIN_MATCH {
                 let mut cur = ip;
                 let mut candidate = pos8;
                 backtrack_match(input, &mut cur, anchor, input, &mut candidate);
-                let match_len = count_same_bytes(input, &mut cur, input, candidate, input.len() - END_OFFSET);
+                let match_len =
+                    count_same_bytes(input, &mut cur, input, candidate, input.len() - END_OFFSET);
                 let match_start = cur - match_len;
                 let offset = (match_start - candidate) as u16;
 
@@ -1057,7 +1137,12 @@ fn compress_mid_internal(input: &[u8], output: &mut impl Sink, table: &mut HashT
                 add_hash8(hash8, input, match_start + 2, input_end);
                 add_hash4(hash4, input, match_start + 1, input_end);
 
-                encode_sequence(&input[anchor..match_start], output, offset, match_len - MIN_MATCH);
+                encode_sequence(
+                    &input[anchor..match_start],
+                    output,
+                    offset,
+                    match_len - MIN_MATCH,
+                );
 
                 ip = cur;
                 anchor = ip;
@@ -1087,7 +1172,8 @@ fn compress_mid_internal(input: &[u8], output: &mut impl Sink, table: &mut HashT
 
         if ip > pos4 && ip - pos4 <= MAX_DISTANCE {
             let mut probe = ip;
-            let match_len = count_same_bytes(input, &mut probe, input, pos4, input.len() - END_OFFSET);
+            let match_len =
+                count_same_bytes(input, &mut probe, input, pos4, input.len() - END_OFFSET);
             if match_len >= MIN_MATCH {
                 // Check ip+1 for potentially longer match
                 let mut best_ip = ip;
@@ -1099,7 +1185,13 @@ fn compress_mid_internal(input: &[u8], output: &mut impl Sink, table: &mut HashT
                     let pos8_next = hash8[h8_next] as usize;
                     if ip + 1 > pos8_next && ip + 1 - pos8_next <= MAX_DISTANCE {
                         let mut probe_next = ip + 1;
-                        let len_next = count_same_bytes(input, &mut probe_next, input, pos8_next, input.len() - END_OFFSET);
+                        let len_next = count_same_bytes(
+                            input,
+                            &mut probe_next,
+                            input,
+                            pos8_next,
+                            input.len() - END_OFFSET,
+                        );
                         if len_next > best_len {
                             hash8[h8_next] = (ip + 1) as u32;
                             best_ip = ip + 1;
@@ -1113,7 +1205,8 @@ fn compress_mid_internal(input: &[u8], output: &mut impl Sink, table: &mut HashT
                 let mut cur = best_ip;
                 let mut candidate = best_pos;
                 backtrack_match(input, &mut cur, anchor, input, &mut candidate);
-                let match_len = count_same_bytes(input, &mut cur, input, candidate, input.len() - END_OFFSET);
+                let match_len =
+                    count_same_bytes(input, &mut cur, input, candidate, input.len() - END_OFFSET);
                 let match_start = cur - match_len;
                 let offset = (match_start - candidate) as u16;
 
@@ -1122,7 +1215,12 @@ fn compress_mid_internal(input: &[u8], output: &mut impl Sink, table: &mut HashT
                 add_hash8(hash8, input, match_start + 2, input_end);
                 add_hash4(hash4, input, match_start + 1, input_end);
 
-                encode_sequence(&input[anchor..match_start], output, offset, match_len - MIN_MATCH);
+                encode_sequence(
+                    &input[anchor..match_start],
+                    output,
+                    offset,
+                    match_len - MIN_MATCH,
+                );
 
                 ip = cur;
                 anchor = ip;
@@ -1158,7 +1256,11 @@ fn compress_mid_internal(input: &[u8], output: &mut impl Sink, table: &mut HashT
 }
 
 /// Internal HC compression implementation using hash chain algorithm
-fn compress_hc_internal(input: &[u8], output: &mut impl Sink, ht: &mut HashTableHCU32) -> Result<usize, CompressError> {
+fn compress_hc_internal(
+    input: &[u8],
+    output: &mut impl Sink,
+    ht: &mut HashTableHCU32,
+) -> Result<usize, CompressError> {
     let output_start_pos = output.pos();
     if input.len() < MFLIMIT + 1 {
         // Input too small to compress
@@ -1228,10 +1330,13 @@ fn compress_hc_internal(input: &[u8], output: &mut impl Sink, ht: &mut HashTable
                     if new_match_len > OPTIMAL_ML {
                         new_match_len = OPTIMAL_ML;
                     }
-                    if match1.start as usize + new_match_len > match2.end().saturating_sub(MINMATCH) {
-                        new_match_len = (match2.start - match1.start) as usize + (match2.len as usize).saturating_sub(MINMATCH);
+                    if match1.start as usize + new_match_len > match2.end().saturating_sub(MINMATCH)
+                    {
+                        new_match_len = (match2.start - match1.start) as usize
+                            + (match2.len as usize).saturating_sub(MINMATCH);
                     }
-                    let correction = new_match_len.saturating_sub((match2.start - match1.start) as usize);
+                    let correction =
+                        new_match_len.saturating_sub((match2.start - match1.start) as usize);
                     if correction > 0 {
                         match2.fix(correction);
                     }
@@ -1318,12 +1423,17 @@ fn compress_hc_internal(input: &[u8], output: &mut impl Sink, ht: &mut HashTable
     }
 
     // Handle remaining literals
-    handle_last_literals(output, &input[anchor.. src_end]);
+    handle_last_literals(output, &input[anchor..src_end]);
     Ok(output.pos() - output_start_pos)
 }
 
 /// Internal optimal parsing compression implementation
-fn compress_opt_internal(input: &[u8], output: &mut impl Sink, level: u8, ht: &mut HashTableHCU32) -> Result<usize, CompressError> {
+fn compress_opt_internal(
+    input: &[u8],
+    output: &mut impl Sink,
+    level: u8,
+    ht: &mut HashTableHCU32,
+) -> Result<usize, CompressError> {
     let output_start_pos = output.pos();
 
     if input.len() < MFLIMIT + 1 {
@@ -1359,7 +1469,8 @@ fn compress_opt_internal(input: &[u8], output: &mut impl Sink, level: u8, ht: &m
         let llen = (ip - anchor) as i32;
 
         // Find first match
-        let (first_len, first_off) = ht.find_longer_match(input, ip as u32, match_limit as u32, (MIN_MATCH - 1) as u32);
+        let (first_len, first_off) =
+            ht.find_longer_match(input, ip as u32, match_limit as u32, (MIN_MATCH - 1) as u32);
         if first_len == 0 {
             ip += 1;
             continue;
@@ -1368,12 +1479,7 @@ fn compress_opt_internal(input: &[u8], output: &mut impl Sink, level: u8, ht: &m
 
         // If match is good enough, encode immediately
         if first_len >= sufficient_len {
-            encode_sequence(
-                &input[anchor..ip],
-                output,
-                first_off,
-                first_len - MIN_MATCH,
-            );
+            encode_sequence(&input[anchor..ip], output, first_off, first_len - MIN_MATCH);
             ip += first_len;
             anchor = ip;
             continue;
@@ -1443,7 +1549,8 @@ fn compress_opt_internal(input: &[u8], output: &mut impl Sink, level: u8, ht: &m
                 (last_match_pos - cur) as u32
             };
 
-            let (new_len, new_off) = ht.find_longer_match(input, cur_ptr as u32, match_limit as u32, min_len_search);
+            let (new_len, new_off) =
+                ht.find_longer_match(input, cur_ptr as u32, match_limit as u32, min_len_search);
             if new_len == 0 {
                 cur += 1;
                 continue;
@@ -1486,12 +1593,7 @@ fn compress_opt_internal(input: &[u8], output: &mut impl Sink, level: u8, ht: &m
                         continue;
                     }
 
-                    encode_sequence(
-                        &input[anchor..ip],
-                        output,
-                        offset,
-                        ml - MIN_MATCH,
-                    );
+                    encode_sequence(&input[anchor..ip], output, offset, ml - MIN_MATCH);
 
                     ip += ml;
                     anchor = ip;
@@ -1506,7 +1608,8 @@ fn compress_opt_internal(input: &[u8], output: &mut impl Sink, level: u8, ht: &m
                 let base_litlen = opt[cur].litlen;
                 for litlen in 1..MIN_MATCH as i32 {
                     let pos = cur + litlen as usize;
-                    let price = opt[cur].price - literals_price(base_litlen) + literals_price(base_litlen + litlen);
+                    let price = opt[cur].price - literals_price(base_litlen)
+                        + literals_price(base_litlen + litlen);
                     if price < opt[pos].price {
                         opt[pos].mlen = 1; // literal
                         opt[pos].off = 0;
@@ -1523,7 +1626,11 @@ fn compress_opt_internal(input: &[u8], output: &mut impl Sink, level: u8, ht: &m
                     let pos = cur + ml;
                     let (ll, price) = if opt[cur].mlen == 1 {
                         let ll = opt[cur].litlen;
-                        let base_price = if cur as i32 > ll { opt[cur - ll as usize].price } else { 0 };
+                        let base_price = if cur as i32 > ll {
+                            opt[cur - ll as usize].price
+                        } else {
+                            0
+                        };
                         (ll, base_price + sequence_price(ll, ml as i32))
                     } else {
                         (0, opt[cur].price + sequence_price(0, ml as i32))
@@ -1586,12 +1693,7 @@ fn compress_opt_internal(input: &[u8], output: &mut impl Sink, level: u8, ht: &m
                     continue;
                 }
 
-                encode_sequence(
-                    &input[anchor..ip],
-                    output,
-                    offset,
-                    ml - MIN_MATCH,
-                );
+                encode_sequence(&input[anchor..ip], output, offset, ml - MIN_MATCH);
 
                 ip += ml;
                 anchor = ip;
@@ -1760,7 +1862,12 @@ mod tests {
         let opt_size = compress_hc(&input, &mut sink_opt, 12).unwrap();
 
         // Optimal should produce same or smaller output
-        assert!(opt_size <= hc_size, "Level 12 ({}) should be <= Level 9 ({})", opt_size, hc_size);
+        assert!(
+            opt_size <= hc_size,
+            "Level 12 ({}) should be <= Level 9 ({})",
+            opt_size,
+            hc_size
+        );
 
         // Both should decompress correctly
         let result_hc = decompress(&output_hc[..hc_size], input.len());
@@ -1775,9 +1882,7 @@ mod tests {
     #[test]
     fn test_compress_hc_level_10_large_input() {
         // Test with a larger input to exercise the optimal algorithm
-        let input: Vec<u8> = (0..10000)
-            .map(|i| ((i * 7 + 13) % 256) as u8)
-            .collect();
+        let input: Vec<u8> = (0..10000).map(|i| ((i * 7 + 13) % 256) as u8).collect();
 
         let mut output = vec![0u8; input.len() * 2];
         let mut sink = SliceSink::new(&mut output, 0);
@@ -1805,7 +1910,10 @@ mod tests {
         let compressed_size = result.unwrap();
         assert!(compressed_size > 0);
         // Should compress very well
-        assert!(compressed_size < input.len() / 10, "Should compress very well");
+        assert!(
+            compressed_size < input.len() / 10,
+            "Should compress very well"
+        );
 
         let result = decompress(&output[..compressed_size], input.len());
         assert!(result.is_ok());
@@ -1816,7 +1924,7 @@ mod tests {
     fn test_compress_hc_level_clamping() {
         // Test that levels are clamped correctly
         let input = b"The quick brown fox jumps over the lazy dog. The quick brown fox.";
-        
+
         // Level 0 should be clamped to 1
         let mut output = vec![0u8; input.len() * 2];
         let mut sink = SliceSink::new(&mut output, 0);
@@ -1844,14 +1952,14 @@ fn test_lz4mid_debug() {
     let input = b"The quick brown fox jumps over the lazy dog. The quick brown fox.";
     println!("Input len: {}", input.len());
     println!("Input: {:?}", String::from_utf8_lossy(input));
-    
+
     let mut output = vec![0u8; input.len() * 2];
     let mut sink = SliceSink::new(&mut output, 0);
     let mut table = HashTableMid::new();
     let size = compress_mid_internal(input, &mut sink, &mut table).unwrap();
     println!("Compressed size: {}", size);
     println!("Compressed: {:02x?}", &output[..size]);
-    
+
     // Try to decompress
     match decompress(&output[..size], input.len()) {
         Ok(d) => {

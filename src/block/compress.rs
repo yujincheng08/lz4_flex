@@ -103,7 +103,13 @@ fn token_from_literal_and_match_length(lit_len: usize, duplicate_length: usize) 
 /// `match_limit` is the absolute position in `input` beyond which we must not read
 #[inline]
 #[cfg(feature = "safe-encode")]
-pub(crate) fn count_same_bytes(input: &[u8], cur: &mut usize, source: &[u8], candidate: usize, match_limit: usize) -> usize {
+pub(crate) fn count_same_bytes(
+    input: &[u8],
+    cur: &mut usize,
+    source: &[u8],
+    candidate: usize,
+    match_limit: usize,
+) -> usize {
     const STEP: usize = core::mem::size_of::<usize>();
     let max_input = match_limit.saturating_sub(*cur);
     let max_source = source.len().saturating_sub(candidate);
@@ -113,7 +119,10 @@ pub(crate) fn count_same_bytes(input: &[u8], cur: &mut usize, source: &[u8], can
     let cand_slice = &source[candidate..candidate + max_len];
 
     let mut num = 0;
-    for (block1, block2) in cur_slice.chunks_exact(STEP).zip(cand_slice.chunks_exact(STEP)) {
+    for (block1, block2) in cur_slice
+        .chunks_exact(STEP)
+        .zip(cand_slice.chunks_exact(STEP))
+    {
         let v1 = usize::from_ne_bytes(block1.try_into().unwrap());
         let v2 = usize::from_ne_bytes(block2.try_into().unwrap());
         if v1 == v2 {
@@ -128,7 +137,11 @@ pub(crate) fn count_same_bytes(input: &[u8], cur: &mut usize, source: &[u8], can
     // Cold tail: byte-by-byte for the remaining 0..7 bytes
     #[cold]
     fn count_tail(a: &[u8], b: &[u8], offset: usize) -> usize {
-        a.iter().zip(b).skip(offset).take_while(|(a, b)| a == b).count()
+        a.iter()
+            .zip(b)
+            .skip(offset)
+            .take_while(|(a, b)| a == b)
+            .count()
     }
     num += count_tail(cur_slice, cand_slice, num);
 
@@ -144,7 +157,13 @@ pub(crate) fn count_same_bytes(input: &[u8], cur: &mut usize, source: &[u8], can
 /// `match_limit` is the absolute position in `input` beyond which we must not read
 #[inline]
 #[cfg(not(feature = "safe-encode"))]
-pub(crate) fn count_same_bytes(input: &[u8], cur: &mut usize, source: &[u8], candidate: usize, match_limit: usize) -> usize {
+pub(crate) fn count_same_bytes(
+    input: &[u8],
+    cur: &mut usize,
+    source: &[u8],
+    candidate: usize,
+    match_limit: usize,
+) -> usize {
     let max_input = match_limit.saturating_sub(*cur);
     let max_source = source.len() - candidate;
     let max_len = max_input.min(max_source);
@@ -185,9 +204,7 @@ pub(crate) fn count_same_bytes(input: &[u8], cur: &mut usize, source: &[u8], can
             }
         }
 
-        if p_in < p_in_limit.sub(1)
-            && read_u16_ptr(p_in) == read_u16_ptr(p_match)
-        {
+        if p_in < p_in_limit.sub(1) && read_u16_ptr(p_in) == read_u16_ptr(p_match) {
             p_in = p_in.add(2);
             p_match = p_match.add(2);
         }
@@ -440,20 +457,36 @@ pub(crate) fn compress_internal<T: HashTable, const USE_DICT: bool, S: Sink>(
         // Generate the higher half of the token.
         cur += MINMATCH;
         candidate += MINMATCH;
-        let duplicate_length = count_same_bytes(input, &mut cur, candidate_source, candidate, input.len() - END_OFFSET);
+        let duplicate_length = count_same_bytes(
+            input,
+            &mut cur,
+            candidate_source,
+            candidate,
+            input.len() - END_OFFSET,
+        );
 
         // Note: The `- 2` offset was copied from the reference implementation, it could be
         // arbitrary.
         let hash = T::get_hash_at(input, cur - 2);
         dict.put_at(hash, cur - 2 + input_stream_offset);
 
-        encode_sequence(&input[literal_start..literal_start + lit_len], output, offset, duplicate_length);
+        encode_sequence(
+            &input[literal_start..literal_start + lit_len],
+            output,
+            offset,
+            duplicate_length,
+        );
 
         literal_start = cur;
     }
 }
 
-pub(crate) fn encode_sequence<S: Sink>(literal: &[u8], output: &mut S, offset: u16, match_len: usize) {
+pub(crate) fn encode_sequence<S: Sink>(
+    literal: &[u8],
+    output: &mut S,
+    offset: u16,
+    match_len: usize,
+) {
     let token = token_from_literal_and_match_length(literal.len(), match_len);
     // Push the token to the output stream.
     push_byte(output, token);
@@ -477,7 +510,6 @@ pub(crate) fn encode_sequence<S: Sink>(literal: &[u8], output: &mut S, offset: u
     if match_len >= 0xF {
         write_integer(output, match_len - 0xF);
     }
-
 }
 
 #[inline]
@@ -803,7 +835,10 @@ mod tests {
         let second: &[u8] = &[
             1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         ];
-        assert_eq!(count_same_bytes(first, &mut 0, second, 0, first.len() - END_OFFSET), 16);
+        assert_eq!(
+            count_same_bytes(first, &mut 0, second, 0, first.len() - END_OFFSET),
+            16
+        );
 
         // 4byte aligned block
         let first: &[u8] = &[
@@ -814,7 +849,10 @@ mod tests {
             1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1,
             1, 1, 1,
         ];
-        assert_eq!(count_same_bytes(first, &mut 0, second, 0, first.len() - END_OFFSET), 20);
+        assert_eq!(
+            count_same_bytes(first, &mut 0, second, 0, first.len() - END_OFFSET),
+            20
+        );
 
         // 2byte aligned block
         let first: &[u8] = &[
@@ -825,7 +863,10 @@ mod tests {
             1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 3, 4, 1, 1, 1, 1, 1, 1, 1,
             1, 1, 1, 1, 1,
         ];
-        assert_eq!(count_same_bytes(first, &mut 0, second, 0, first.len() - END_OFFSET), 22);
+        assert_eq!(
+            count_same_bytes(first, &mut 0, second, 0, first.len() - END_OFFSET),
+            22
+        );
 
         // 1byte aligned block
         let first: &[u8] = &[
@@ -836,7 +877,10 @@ mod tests {
             1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 3, 4, 5, 1, 1, 1, 1, 1, 1,
             1, 1, 1, 1, 1, 1,
         ];
-        assert_eq!(count_same_bytes(first, &mut 0, second, 0, first.len() - END_OFFSET), 23);
+        assert_eq!(
+            count_same_bytes(first, &mut 0, second, 0, first.len() - END_OFFSET),
+            23
+        );
 
         // 1byte aligned block - last byte different
         let first: &[u8] = &[
@@ -847,7 +891,10 @@ mod tests {
             1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 3, 4, 6, 1, 1, 1, 1, 1, 1,
             1, 1, 1, 1, 1, 1,
         ];
-        assert_eq!(count_same_bytes(first, &mut 0, second, 0, first.len() - END_OFFSET), 22);
+        assert_eq!(
+            count_same_bytes(first, &mut 0, second, 0, first.len() - END_OFFSET),
+            22
+        );
 
         // 1byte aligned block
         let first: &[u8] = &[
@@ -858,14 +905,23 @@ mod tests {
             1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 3, 4, 6, 1, 1, 1, 1, 1, 1,
             1, 1, 1, 1, 1, 1,
         ];
-        assert_eq!(count_same_bytes(first, &mut 0, second, 0, first.len() - END_OFFSET), 21);
+        assert_eq!(
+            count_same_bytes(first, &mut 0, second, 0, first.len() - END_OFFSET),
+            21
+        );
 
         for diff_idx in 8..100 {
             let first: Vec<u8> = (0u8..255).cycle().take(100 + 12).collect();
             let mut second = first.clone();
             second[diff_idx] = 255;
             for start in 0..=diff_idx {
-                let same_bytes = count_same_bytes(&first, &mut start.clone(), &second, start, first.len() - END_OFFSET);
+                let same_bytes = count_same_bytes(
+                    &first,
+                    &mut start.clone(),
+                    &second,
+                    start,
+                    first.len() - END_OFFSET,
+                );
                 assert_eq!(same_bytes, diff_idx - start);
             }
         }
