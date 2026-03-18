@@ -13,7 +13,7 @@ use crate::{
     sink::vec_sink_for_compression,
 };
 
-use crate::block::compress_hc::{compress_hc_with_table, CompressTableHC};
+use crate::block::compress_hc::{compress_hc_linked, compress_hc_with_table, CompressTableHC};
 
 use super::Error;
 use super::{
@@ -167,13 +167,12 @@ impl<W: io::Write> FrameEncoder<W> {
     /// Creates a new Encoder with the specified compression level.
     ///
     /// The compression level ranges from 1 to 12 (matching C LZ4 CLI behavior):
-    /// - Level 1: Fast algorithm (same as default, supports linked blocks)
+    /// - Level 1: Fast algorithm (same as default)
     /// - Level 2: lz4mid intermediate algorithm
     /// - Levels 3-9: HC algorithm with increasing search depth
     /// - Levels 10-12: Optimal parsing algorithm for maximum compression
     ///
-    /// Levels 2+ force independent block mode (linked blocks are not supported
-    /// for HC/mid compression).
+    /// All levels support both independent and linked block modes.
     ///
     /// # Example
     /// ```no_run
@@ -187,52 +186,34 @@ impl<W: io::Write> FrameEncoder<W> {
     /// compressor.write_all(b"data to compress").unwrap();
     /// compressor.finish().unwrap();
     /// ```
-    pub fn with_compression_level(mut frame_info: FrameInfo, wtr: W, level: u8) -> Self {
+    pub fn with_compression_level(frame_info: FrameInfo, wtr: W, level: u8) -> Self {
         let level = level.clamp(1, 12);
 
-        // Level 1: fast algorithm (supports linked blocks, like C)
-        // Level 2+: compress_hc (lz4mid for 2, HC for 3-9, optimal for 10-12)
-        //           requires independent blocks
-        if level == 1 {
-            FrameEncoder {
-                src: Vec::new(),
-                w: wtr,
-                compression_table: Some(HashTable4K::new()),
-                content_hasher: XxHash32::with_seed(0),
-                content_len: 0,
-                dst: Vec::new(),
-                is_frame_open: false,
-                data_to_frame_written: false,
-                frame_info,
-                src_start: 0,
-                src_end: 0,
-                ext_dict_offset: 0,
-                ext_dict_len: 0,
-                src_stream_offset: 0,
-                compression_level: level,
-                hc_table: None,
-            }
-        } else {
-            frame_info.block_mode = BlockMode::Independent;
-
-            FrameEncoder {
-                src: Vec::new(),
-                w: wtr,
-                compression_table: None,
-                content_hasher: XxHash32::with_seed(0),
-                content_len: 0,
-                dst: Vec::new(),
-                is_frame_open: false,
-                data_to_frame_written: false,
-                frame_info,
-                src_start: 0,
-                src_end: 0,
-                ext_dict_offset: 0,
-                ext_dict_len: 0,
-                src_stream_offset: 0,
-                compression_level: level,
-                hc_table: Some(CompressTableHC::new()),
-            }
+        FrameEncoder {
+            src: Vec::new(),
+            w: wtr,
+            compression_table: if level == 1 {
+                Some(HashTable4K::new())
+            } else {
+                None
+            },
+            content_hasher: XxHash32::with_seed(0),
+            content_len: 0,
+            dst: Vec::new(),
+            is_frame_open: false,
+            data_to_frame_written: false,
+            frame_info,
+            src_start: 0,
+            src_end: 0,
+            ext_dict_offset: 0,
+            ext_dict_len: 0,
+            src_stream_offset: 0,
+            compression_level: level,
+            hc_table: if level >= 2 {
+                Some(CompressTableHC::new())
+            } else {
+                None
+            },
         }
     }
 
@@ -333,6 +314,8 @@ impl<W: io::Write> FrameEncoder<W> {
             if let Some(ref mut table) = self.compression_table {
                 table.clear();
             }
+            // HC table will be reset on next compress_hc_with_table or prepare_linked_block call
+            self.hc_table = None;
         }
         Ok(())
     }
@@ -382,6 +365,51 @@ impl<W: io::Write> FrameEncoder<W> {
         }
     }
 
+    /// Compress a block using the HC algorithm (levels 2+)
+    fn compress_block_hc(
+        &mut self,
+        dst_required_size: usize,
+    ) -> Result<usize, crate::block::CompressError> {
+        let max_block_size = self.frame_info.block_size.get_size();
+        let hc_table = self
+            .hc_table
+            .get_or_insert_with(CompressTableHC::new);
+
+        if self.frame_info.block_mode == BlockMode::Linked {
+            // Reposition to avoid u32 overflow
+            if self.src_stream_offset + max_block_size + WINDOW_SIZE >= u32::MAX as usize / 2 {
+                hc_table.reposition(self.src_stream_offset - self.ext_dict_len);
+                self.src_stream_offset = self.ext_dict_len;
+            }
+
+            let input = &self.src[..self.src_end];
+            let ext_dict = if self.ext_dict_len != 0 {
+                &self.src[self.ext_dict_offset..self.ext_dict_offset + self.ext_dict_len]
+            } else {
+                &[] as &[u8]
+            };
+
+            hc_table.prepare_linked_block(self.compression_level, self.src_start + self.src_stream_offset);
+
+            compress_hc_linked(
+                input,
+                self.src_start,
+                &mut vec_sink_for_compression(&mut self.dst, 0, 0, dst_required_size),
+                self.compression_level,
+                hc_table,
+                ext_dict,
+                self.src_stream_offset,
+            )
+        } else {
+            compress_hc_with_table(
+                &self.src[self.src_start..self.src_end],
+                &mut vec_sink_for_compression(&mut self.dst, 0, 0, dst_required_size),
+                self.compression_level,
+                hc_table,
+            )
+        }
+    }
+
     /// Consumes the src contents between src_start and src_end,
     /// which shouldn't exceed the max block size.
     fn write_block(&mut self) -> io::Result<()> {
@@ -394,21 +422,10 @@ impl<W: io::Write> FrameEncoder<W> {
         let src_len = src_end - src_start;
         let dst_required_size = crate::block::compress::get_maximum_output_size(src_len);
 
-        // Select compression algorithm:
-        // - If compression_table is Some (level 1): use fast algorithm (supports linked blocks)
-        // - If compression_table is None (levels 2+): use compress_hc
-        //   - Level 2: lz4mid
-        //   - Levels 3-9: HC hash chain
-        //   - Levels 10-12: optimal parsing
         let compress_result = if self.compression_table.is_some() {
             self.compress_block_fast(dst_required_size)
         } else {
-            compress_hc_with_table(
-                &self.src[src_start..src_end],
-                &mut vec_sink_for_compression(&mut self.dst, 0, 0, dst_required_size),
-                self.compression_level,
-                self.hc_table.get_or_insert_with(CompressTableHC::new),
-            )
+            self.compress_block_hc(dst_required_size)
         };
 
         let compressed_len = compress_result.map_err(Error::CompressionError)?;

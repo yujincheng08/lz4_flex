@@ -796,3 +796,91 @@ mod test_compression {
         }
     }
 }
+
+#[cfg(feature = "frame")]
+mod hc_linked {
+    use super::*;
+    use lz4_flex::frame::{BlockMode, FrameEncoder, FrameInfo};
+    use std::io::{Read, Write};
+
+    fn compress_with_level(input: &[u8], level: u8, block_mode: BlockMode) -> Vec<u8> {
+        let mut frame_info = FrameInfo::new();
+        frame_info.block_mode = block_mode;
+        let buffer = Vec::new();
+        let mut enc = FrameEncoder::with_compression_level(frame_info, buffer, level);
+        enc.write_all(input).unwrap();
+        enc.finish().unwrap()
+    }
+
+    fn decompress_frame(data: &[u8]) -> Vec<u8> {
+        let mut dec = lz4_flex::frame::FrameDecoder::new(data);
+        let mut out = Vec::new();
+        dec.read_to_end(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn hc_linked_roundtrip_all_levels() {
+        for level in [2u8, 4, 9, 10, 12] {
+            for input in [
+                COMPRESSION1K,
+                COMPRESSION34K,
+                COMPRESSION65,
+                COMPRESSION10MB,
+            ] {
+                let compressed = compress_with_level(input, level, BlockMode::Linked);
+                let decompressed = decompress_frame(&compressed);
+                assert_eq!(
+                    decompressed.len(),
+                    input.len(),
+                    "Size mismatch at level {} for input len {}",
+                    level,
+                    input.len()
+                );
+                assert_eq!(
+                    &decompressed[..],
+                    input,
+                    "Data mismatch at level {} for input len {}",
+                    level,
+                    input.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hc_linked_better_than_independent() {
+        for level in [2u8, 4, 9, 12] {
+            let ind = compress_with_level(COMPRESSION10MB, level, BlockMode::Independent);
+            let linked = compress_with_level(COMPRESSION10MB, level, BlockMode::Linked);
+            assert!(
+                linked.len() <= ind.len(),
+                "Level {}: linked ({}) should be <= independent ({})",
+                level,
+                linked.len(),
+                ind.len()
+            );
+        }
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn hc_linked_cross_library_decompress() {
+        for level in [2u8, 9, 12] {
+            let compressed = compress_with_level(COMPRESSION10MB, level, BlockMode::Linked);
+            let decompressed = lz4_cpp_frame_decompress(&compressed).unwrap();
+            assert_eq!(
+                decompressed.len(),
+                COMPRESSION10MB.len(),
+                "C decompress size mismatch at level {}",
+                level
+            );
+            assert_eq!(
+                &decompressed[..],
+                COMPRESSION10MB,
+                "C decompress data mismatch at level {}",
+                level
+            );
+        }
+    }
+}

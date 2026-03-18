@@ -41,15 +41,10 @@ fuzz_target!(|input: Input| {
     };
 
     for level in levels {
-        // HC levels only support Independent block mode
-        let block_modes: &[lz4_flex::frame::BlockMode] = if *level > 1 {
-            &[lz4_flex::frame::BlockMode::Independent]
-        } else {
-            &[
-                lz4_flex::frame::BlockMode::Independent,
-                lz4_flex::frame::BlockMode::Linked,
-            ]
-        };
+        let block_modes: &[lz4_flex::frame::BlockMode] = &[
+            lz4_flex::frame::BlockMode::Independent,
+            lz4_flex::frame::BlockMode::Linked,
+        ];
 
         for bm in block_modes {
             for bs in &[
