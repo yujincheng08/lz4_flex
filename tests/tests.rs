@@ -821,7 +821,7 @@ mod hc_linked {
 
     #[test]
     fn hc_linked_roundtrip_all_levels() {
-        for level in [2u8, 4, 9, 10, 12] {
+        for level in 1..=12 {
             for input in [
                 COMPRESSION1K,
                 COMPRESSION34K,
@@ -850,7 +850,7 @@ mod hc_linked {
 
     #[test]
     fn hc_linked_better_than_independent() {
-        for level in [2u8, 4, 9, 12] {
+        for level in 1..=12 {
             let ind = compress_with_level(COMPRESSION10MB, level, BlockMode::Independent);
             let linked = compress_with_level(COMPRESSION10MB, level, BlockMode::Linked);
             assert!(
@@ -866,7 +866,7 @@ mod hc_linked {
     #[cfg(not(miri))]
     #[test]
     fn hc_linked_cross_library_decompress() {
-        for level in [2u8, 9, 12] {
+        for level in 1..=12 {
             let compressed = compress_with_level(COMPRESSION10MB, level, BlockMode::Linked);
             let decompressed = lz4_cpp_frame_decompress(&compressed).unwrap();
             assert_eq!(
