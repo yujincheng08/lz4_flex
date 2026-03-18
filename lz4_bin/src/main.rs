@@ -20,7 +20,6 @@ struct Options {
     /// force decompress
     decompress: bool,
 
-    #[cfg(feature = "hc")]
     #[argh(option, short = 'l')]
     /// compression level 1-12 (1=fast, 2=mid, 3-9=HC, 10-12=optimal)
     level: Option<u8>,
@@ -43,10 +42,7 @@ const LZ_EXTENSION: &str = ".lz4";
 fn main() -> Result<()> {
     let opts: Options = argh::from_env();
 
-    #[cfg(feature = "hc")]
     let level = opts.level;
-    #[cfg(not(feature = "hc"))]
-    let level: Option<u8> = None;
 
     let input_file = opts.input_file.filter(|f| f.as_os_str() != "-");
 
@@ -119,7 +115,6 @@ fn create_encoder<W: io::Write>(
     level: Option<u8>,
 ) -> lz4_flex::frame::FrameEncoder<W> {
     match level {
-        #[cfg(feature = "hc")]
         Some(lvl) => lz4_flex::frame::FrameEncoder::with_compression_level(frame_info, wtr, lvl),
         _ => lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, wtr),
     }

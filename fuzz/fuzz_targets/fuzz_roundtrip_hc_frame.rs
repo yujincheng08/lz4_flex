@@ -32,8 +32,6 @@ fuzz_target!(|input: Input| {
     }
     data.truncate(data_size);
 
-    // Compression levels to test: 1 (fast), and with hc feature: 2 (mid), 3-9 (hc), 10-12 (opt)
-    #[cfg(feature = "hc")]
     let levels: &[u32] = match compression_level_seed % 5 {
         0 => &[1],       // fast
         1 => &[2],       // mid
@@ -41,7 +39,6 @@ fuzz_target!(|input: Input| {
         3 => &[10, 12],  // opt (sample)
         _ => &[1, 2, 9, 12], // mix
     };
-    let levels: &[u32] = &[1];
 
     for level in levels {
         // HC levels only support Independent block mode
@@ -69,16 +66,10 @@ fuzz_target!(|input: Input| {
                     fi.block_checksums = *check_sum;
                     fi.content_checksum = *check_sum;
 
-                    #[cfg(feature = "hc")]
                     let mut enc = lz4_flex::frame::FrameEncoder::with_compression_level(
                         fi,
                         Vec::with_capacity(data_size),
                         *level as u8,
-                    );
-                    #[cfg(not(feature = "hc"))]
-                    let mut enc = lz4_flex::frame::FrameEncoder::with_frame_info(
-                        fi,
-                        Vec::with_capacity(data_size),
                     );
 
                     for chunk in data.chunks(chunk_size) {

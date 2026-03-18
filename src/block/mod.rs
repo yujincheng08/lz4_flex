@@ -16,7 +16,6 @@
 
 #[cfg_attr(feature = "safe-encode", forbid(unsafe_code))]
 pub(crate) mod compress;
-#[cfg(feature = "hc")]
 pub(crate) mod compress_hc;
 pub(crate) mod hashtable;
 
@@ -30,7 +29,6 @@ pub(crate) use decompress_safe as decompress;
 pub(crate) mod decompress;
 
 pub use compress::*;
-#[cfg(feature = "hc")]
 pub use compress_hc::{
     compress_hc, compress_hc_to_vec, compress_hc_to_vec_with_table, compress_hc_with_table,
     CompressTableHC,

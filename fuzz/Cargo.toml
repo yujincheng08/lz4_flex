@@ -10,17 +10,16 @@ edition = "2018"
 cargo-fuzz = true
 
 [features]
-default = ["safe-encode", "safe-decode", "hc"]
+default = ["safe-encode", "safe-decode"]
 safe-encode = ["lz4_flex/safe-encode"]
 safe-decode = ["lz4_flex/safe-decode"]
-hc = ["lz4_flex/hc"]
 
 [dependencies]
 arbitrary = { version = "1", features = ["derive"] }
 libfuzzer-sys = "0.4"
 lzzzz = "0.8"
 
-lz4_flex = { path = "..", default-features = false, features=["frame", "hc"] }
+lz4_flex = { path = "..", default-features = false, features=["frame"] }
 
 # Prevent this from interfering with workspaces
 [workspace]

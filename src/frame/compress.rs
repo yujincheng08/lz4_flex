@@ -13,7 +13,6 @@ use crate::{
     sink::vec_sink_for_compression,
 };
 
-#[cfg(feature = "hc")]
 use crate::block::compress_hc::{compress_hc_with_table, CompressTableHC};
 
 use super::Error;
@@ -94,10 +93,8 @@ pub struct FrameEncoder<W: io::Write> {
     /// The frame information to be used in this encoder.
     frame_info: FrameInfo,
     /// Compression level (1 = fast, 2 = mid, 3-9 = HC, 10-12 = optimal)
-    #[cfg(feature = "hc")]
     compression_level: u8,
     /// Reusable HC compression table (used for levels 2+, None for level 1)
-    #[cfg(feature = "hc")]
     hc_table: Option<CompressTableHC>,
 }
 
@@ -157,9 +154,7 @@ impl<W: io::Write> FrameEncoder<W> {
             ext_dict_offset: 0,
             ext_dict_len: 0,
             src_stream_offset: 0,
-            #[cfg(feature = "hc")]
             compression_level: 1,
-            #[cfg(feature = "hc")]
             hc_table: None,
         }
     }
@@ -192,7 +187,6 @@ impl<W: io::Write> FrameEncoder<W> {
     /// compressor.write_all(b"data to compress").unwrap();
     /// compressor.finish().unwrap();
     /// ```
-    #[cfg(feature = "hc")]
     pub fn with_compression_level(mut frame_info: FrameInfo, wtr: W, level: u8) -> Self {
         let level = level.clamp(1, 12);
 
@@ -406,7 +400,6 @@ impl<W: io::Write> FrameEncoder<W> {
         //   - Level 2: lz4mid
         //   - Levels 3-9: HC hash chain
         //   - Levels 10-12: optimal parsing
-        #[cfg(feature = "hc")]
         let compress_result = if self.compression_table.is_some() {
             self.compress_block_fast(dst_required_size)
         } else {
@@ -417,9 +410,6 @@ impl<W: io::Write> FrameEncoder<W> {
                 self.hc_table.get_or_insert_with(CompressTableHC::new),
             )
         };
-
-        #[cfg(not(feature = "hc"))]
-        let compress_result = self.compress_block_fast(dst_required_size);
 
         let compressed_len = compress_result.map_err(Error::CompressionError)?;
 
