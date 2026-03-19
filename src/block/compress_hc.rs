@@ -552,8 +552,7 @@ impl HashTableHCU32 {
 
                 if match_info.len >= MIN_MATCH as u32 && ref_local >= look_back_length {
                     let src_check = start_limit + match_info.len as usize - 1;
-                    let match_check =
-                        ref_local - look_back_length + match_info.len as usize - 1;
+                    let match_check = ref_local - look_back_length + match_info.len as usize - 1;
                     if input[src_check] != input[match_check]
                         || input[src_check + 1] != input[match_check + 1]
                     {
@@ -584,8 +583,8 @@ impl HashTableHCU32 {
                     if match_len > match_info.len {
                         match_info.len = match_len;
                         let distance = abs_off - candidate_abs;
-                        match_info.ref_pos = ((off - match_len_backward) as u32)
-                            .wrapping_sub(distance as u32);
+                        match_info.ref_pos =
+                            ((off - match_len_backward) as u32).wrapping_sub(distance as u32);
                         match_info.start = (off - match_len_backward) as u32;
                     }
                 }
@@ -848,12 +847,8 @@ impl HashTableHCU32 {
                             if mc_local + 4 <= input.len()
                                 && super::compress::get_batch(input, mc_local) == pattern
                             {
-                                let forward_pattern_len = count_pattern(
-                                    input,
-                                    mc_local + 4,
-                                    match_limit,
-                                    pattern,
-                                ) + 4;
+                                let forward_pattern_len =
+                                    count_pattern(input, mc_local + 4, match_limit, pattern) + 4;
                                 let back_length =
                                     reverse_count_pattern(input, mc_local, 0, pattern);
                                 let current_segment_len = back_length + forward_pattern_len;
@@ -876,8 +871,7 @@ impl HashTableHCU32 {
                                     if abs_off > new_ref_abs
                                         && abs_off - new_ref_abs <= self.chain_mask()
                                     {
-                                        let max_ml =
-                                            current_segment_len.min(src_pattern_length);
+                                        let max_ml = current_segment_len.min(src_pattern_length);
                                         if max_ml > best_len {
                                             best_len = max_ml;
                                             best_offset = (abs_off - new_ref_abs) as u16;
@@ -1495,8 +1489,7 @@ fn compress_mid_internal(
                 let mut candidate = cand8;
                 let cand_src = src8;
                 backtrack_match(input, &mut cur, anchor, cand_src, &mut candidate);
-                let match_len =
-                    count_same_bytes(input, &mut cur, cand_src, candidate, match_limit);
+                let match_len = count_same_bytes(input, &mut cur, cand_src, candidate, match_limit);
                 let match_start = cur - match_len;
                 let offset = dist8 as u16;
 
@@ -1582,8 +1575,7 @@ fn compress_mid_internal(
                 let mut cur = best_ip;
                 let mut candidate = best_cand;
                 backtrack_match(input, &mut cur, anchor, best_src, &mut candidate);
-                let match_len =
-                    count_same_bytes(input, &mut cur, best_src, candidate, match_limit);
+                let match_len = count_same_bytes(input, &mut cur, best_src, candidate, match_limit);
                 let match_start = cur - match_len;
                 let offset = best_dist as u16;
 
@@ -1932,15 +1924,14 @@ fn compress_opt_internal(
                 (last_match_pos - cur) as u32
             };
 
-            let (new_len, new_off) =
-                ht.find_longer_match(
-                    input,
-                    cur_ptr as u32,
-                    match_limit as u32,
-                    min_len_search,
-                    ext_dict,
-                    stream_offset,
-                );
+            let (new_len, new_off) = ht.find_longer_match(
+                input,
+                cur_ptr as u32,
+                match_limit as u32,
+                min_len_search,
+                ext_dict,
+                stream_offset,
+            );
             if new_len == 0 {
                 cur += 1;
                 continue;

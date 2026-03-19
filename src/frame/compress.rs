@@ -371,9 +371,7 @@ impl<W: io::Write> FrameEncoder<W> {
         dst_required_size: usize,
     ) -> Result<usize, crate::block::CompressError> {
         let max_block_size = self.frame_info.block_size.get_size();
-        let hc_table = self
-            .hc_table
-            .get_or_insert_with(CompressTableHC::new);
+        let hc_table = self.hc_table.get_or_insert_with(CompressTableHC::new);
 
         if self.frame_info.block_mode == BlockMode::Linked {
             // Reposition to avoid u32 overflow
@@ -389,7 +387,10 @@ impl<W: io::Write> FrameEncoder<W> {
                 &[] as &[u8]
             };
 
-            hc_table.prepare_linked_block(self.compression_level, self.src_start + self.src_stream_offset);
+            hc_table.prepare_linked_block(
+                self.compression_level,
+                self.src_start + self.src_stream_offset,
+            );
 
             compress_hc_linked(
                 input,
