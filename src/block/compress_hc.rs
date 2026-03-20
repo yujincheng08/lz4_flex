@@ -272,6 +272,7 @@ impl HashTableHCU32 {
     /// Prepare the table for a new linked block without clearing existing entries.
     /// Ensures the chain table is `MAX_DISTANCE_HC` so cross-block chain links work,
     /// and advances `next_to_update` past the positions now in `ext_dict`.
+    #[cfg(feature = "frame")]
     fn prepare_linked_block(&mut self, max_attempts: usize, abs_block_start: usize) {
         if self.chain_table.len() < MAX_DISTANCE_HC {
             let mut new_chain = vec![0u16; MAX_DISTANCE_HC].into_boxed_slice();
@@ -287,6 +288,7 @@ impl HashTableHCU32 {
 
     /// Subtract `delta` from every absolute position stored in the hash table.
     /// Used when `stream_offset` approaches `u32::MAX / 2` to prevent overflow.
+    #[cfg(feature = "frame")]
     fn reposition(&mut self, delta: usize) {
         let delta32 = delta as u32;
         for entry in self.dict.iter_mut() {
@@ -1008,7 +1010,6 @@ fn sequence_price(litlen: i32, mlen: i32) -> i32 {
 /// ```
 pub struct CompressTableHC {
     inner: CompressTableHCInner,
-    compression_level: u8,
 }
 
 enum CompressTableHCInner {
@@ -1021,12 +1022,12 @@ impl CompressTableHC {
     pub fn new() -> Self {
         CompressTableHC {
             inner: CompressTableHCInner::Mid(HashTableMid::new()),
-            compression_level: 0,
         }
     }
 
     /// Prepare the table for a new linked block without clearing existing entries.
     /// Called by `FrameEncoder` between blocks in linked mode.
+    #[cfg(feature = "frame")]
     pub(crate) fn prepare_linked_block(&mut self, level: u8, abs_block_start: usize) {
         let level = level.min(12);
         let max_attempts = if level >= 10 {
@@ -1062,10 +1063,10 @@ impl CompressTableHC {
                 }
             }
         }
-        self.compression_level = level;
     }
 
     /// Subtract `delta` from all stored positions to prevent overflow.
+    #[cfg(feature = "frame")]
     pub(crate) fn reposition(&mut self, delta: usize) {
         match &mut self.inner {
             CompressTableHCInner::HC(ht) => ht.reposition(delta),
@@ -1194,6 +1195,7 @@ pub fn compress_hc_with_table(
 /// Compress with HC using linked-block mode. Called by the frame encoder.
 /// `input` includes the prefix at `[0..input_pos]`, current block at `[input_pos..]`.
 /// `table` must have been prepared via `prepare_linked_block` for the current block.
+#[cfg(feature = "frame")]
 pub(crate) fn compress_hc_linked(
     input: &[u8],
     input_pos: usize,
@@ -1340,11 +1342,13 @@ impl HashTableMid {
     }
 
     /// Prepare the table for a new linked block without clearing entries.
+    #[cfg(feature = "frame")]
     fn prepare_linked_block(&mut self) {
         // Hash tables persist; no action needed since entries are absolute positions.
     }
 
     /// Subtract `delta` from every absolute position stored in both hash tables.
+    #[cfg(feature = "frame")]
     fn reposition(&mut self, delta: usize) {
         let delta32 = delta as u32;
         for entry in self.hash4.iter_mut() {

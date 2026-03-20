@@ -67,6 +67,18 @@ pub fn lz4_flex_frame_compress_with(
 }
 
 #[cfg(feature = "frame")]
+pub fn lz4_flex_frame_compress_with_level(
+    frame_info: lz4_flex::frame::FrameInfo,
+    input: &[u8],
+    level: u8,
+) -> Result<Vec<u8>, std::io::Error> {
+    let buffer = Vec::new();
+    let mut enc = lz4_flex::frame::FrameEncoder::with_compression_level(frame_info, buffer, level);
+    std::io::Write::write_all(&mut enc, input)?;
+    Ok(enc.finish()?)
+}
+
+#[cfg(feature = "frame")]
 pub fn lz4_flex_frame_decompress(input: &[u8]) -> Result<Vec<u8>, lz4_flex::frame::Error> {
     let mut de = lz4_flex::frame::FrameDecoder::new(input);
     let mut out = Vec::new();
@@ -87,8 +99,7 @@ fn test_roundtrip(bytes: impl AsRef<[u8]>) {
     let decompressed = decompress_size_prepended(&compressed_flex).unwrap();
     assert_eq!(decompressed, bytes);
 
-    // Frame format
-    // compress with rust, decompress with rust
+    // Frame format (default / fast compression, level 1)
     #[cfg(feature = "frame")]
     for bm in &[BlockMode::Independent, BlockMode::Linked] {
         let mut frame_info = lz4_flex::frame::FrameInfo::new();
@@ -96,6 +107,30 @@ fn test_roundtrip(bytes: impl AsRef<[u8]>) {
         let compressed_flex = lz4_flex_frame_compress_with(frame_info, bytes).unwrap();
         let decompressed = lz4_flex_frame_decompress(&compressed_flex).unwrap();
         assert_eq!(decompressed, bytes);
+    }
+
+    // Block HC: all compression levels (1–12)
+    for level in 1..=12 {
+        let compressed_hc = lz4_flex::block::compress_hc_to_vec(bytes, level);
+        let decompressed = decompress(&compressed_hc, bytes.len()).unwrap();
+        assert_eq!(decompressed, bytes, "HC block roundtrip level {}", level);
+    }
+
+    // Frame format: all compression levels (1–12) × both block modes
+    #[cfg(feature = "frame")]
+    for level in 1..=12 {
+        for bm in &[BlockMode::Independent, BlockMode::Linked] {
+            let mut frame_info = lz4_flex::frame::FrameInfo::new();
+            frame_info.block_mode = *bm;
+            let compressed_flex =
+                lz4_flex_frame_compress_with_level(frame_info, bytes, level).unwrap();
+            let decompressed = lz4_flex_frame_decompress(&compressed_flex).unwrap();
+            assert_eq!(
+                decompressed, bytes,
+                "Frame roundtrip level {} block_mode {:?}",
+                level, bm
+            );
+        }
     }
 
     lz4_cpp_compatibility(bytes);
@@ -132,7 +167,7 @@ fn lz4_cpp_compatibility(bytes: &[u8]) {
         let decompressed = lz4_flex_frame_decompress(&compressed).unwrap();
         assert_eq!(decompressed, bytes);
 
-        // compress with rust, decompress with lz4 cpp
+        // compress with rust (default fast), decompress with lz4 cpp
         //if !bytes.is_empty() {
         // compress_frame won't write a header if nothing is written to it
         // which is more in line with io::Write interface?
@@ -142,6 +177,22 @@ fn lz4_cpp_compatibility(bytes: &[u8]) {
             let compressed_flex = lz4_flex_frame_compress_with(frame_info, bytes).unwrap();
             let decompressed = lz4_cpp_frame_decompress(&compressed_flex).unwrap();
             assert_eq!(decompressed, bytes);
+        }
+
+        // compress with rust at each HC level, decompress with lz4 cpp
+        for level in 1..=12 {
+            for bm in &[BlockMode::Independent, BlockMode::Linked] {
+                let mut frame_info = lz4_flex::frame::FrameInfo::new();
+                frame_info.block_mode = *bm;
+                let compressed_flex =
+                    lz4_flex_frame_compress_with_level(frame_info, bytes, level).unwrap();
+                let decompressed = lz4_cpp_frame_decompress(&compressed_flex).unwrap();
+                assert_eq!(
+                    decompressed, bytes,
+                    "C frame decompress level {} block_mode {:?}",
+                    level, bm
+                );
+            }
         }
     }
 }
