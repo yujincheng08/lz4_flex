@@ -111,6 +111,7 @@ pub(crate) fn count_same_bytes(
     match_limit: usize,
 ) -> usize {
     const STEP: usize = core::mem::size_of::<usize>();
+    // Same bound as pre-match_limit API: `input.len() - END_OFFSET` when `match_limit` is that value.
     let max_input = match_limit.saturating_sub(*cur);
     let max_source = source.len().saturating_sub(candidate);
     let max_len = max_input.min(max_source);
@@ -149,7 +150,7 @@ pub(crate) fn count_same_bytes(
     num
 }
 
-/// Counts the number of same bytes in two byte streams, using pointer-based comparison.
+/// Counts the number of same bytes in two byte streams (unsafe pointer reads on the hot path).
 /// `input` is the complete input
 /// `cur` is the current position in the input. it will be incremented by the number of matched
 /// bytes `source` either the same as input OR an external slice
@@ -164,59 +165,62 @@ pub(crate) fn count_same_bytes(
     candidate: usize,
     match_limit: usize,
 ) -> usize {
-    let max_input = match_limit.saturating_sub(*cur);
-    let max_source = source.len() - candidate;
-    let max_len = max_input.min(max_source);
+    // `match_limit` replaces the historical `input.len() - END_OFFSET` end bound (see call sites).
+    let max_input_match = match_limit.saturating_sub(*cur);
+    let max_candidate_match = source.len() - candidate;
+    let input_end = *cur + max_input_match.min(max_candidate_match);
 
-    // SAFETY: *cur + max_len <= match_limit <= input.len(), candidate + max_len <= source.len()
-    unsafe {
-        let mut p_in = input.as_ptr().add(*cur);
-        let mut p_match = source.as_ptr().add(candidate);
-        let p_in_limit = p_in.add(max_len);
-        let p_start = p_in;
+    let start = *cur;
+    let mut source_ptr = unsafe { source.as_ptr().add(candidate) };
 
-        const STEP: usize = core::mem::size_of::<usize>();
+    const STEP_SIZE: usize = core::mem::size_of::<usize>();
+    while *cur + STEP_SIZE <= input_end {
+        let diff = read_usize_ptr(unsafe { input.as_ptr().add(*cur) }) ^ read_usize_ptr(source_ptr);
 
-        while p_in < p_in_limit.sub(STEP - 1) {
-            let diff = read_usize_ptr(p_in) ^ read_usize_ptr(p_match);
-            if diff == 0 {
-                p_in = p_in.add(STEP);
-                p_match = p_match.add(STEP);
-            } else {
-                p_in = p_in.add((diff.to_le().trailing_zeros() / 8) as usize);
-                let num = p_in.offset_from(p_start) as usize;
-                *cur += num;
-                return num;
+        if diff == 0 {
+            *cur += STEP_SIZE;
+            unsafe {
+                source_ptr = source_ptr.add(STEP_SIZE);
             }
+        } else {
+            *cur += (diff.to_le().trailing_zeros() / 8) as usize;
+            return *cur - start;
         }
-
-        #[cfg(target_pointer_width = "64")]
-        if p_in < p_in_limit.sub(3) {
-            let diff = read_u32_ptr(p_in) ^ read_u32_ptr(p_match);
-            if diff == 0 {
-                p_in = p_in.add(4);
-                p_match = p_match.add(4);
-            } else {
-                p_in = p_in.add((diff.to_le().trailing_zeros() / 8) as usize);
-                let num = p_in.offset_from(p_start) as usize;
-                *cur += num;
-                return num;
-            }
-        }
-
-        if p_in < p_in_limit.sub(1) && read_u16_ptr(p_in) == read_u16_ptr(p_match) {
-            p_in = p_in.add(2);
-            p_match = p_match.add(2);
-        }
-
-        if p_in < p_in_limit && *p_in == *p_match {
-            p_in = p_in.add(1);
-        }
-
-        let num = p_in.offset_from(p_start) as usize;
-        *cur += num;
-        num
     }
+
+    #[cfg(target_pointer_width = "64")]
+    {
+        if input_end - *cur >= 4 {
+            let diff = read_u32_ptr(unsafe { input.as_ptr().add(*cur) }) ^ read_u32_ptr(source_ptr);
+
+            if diff == 0 {
+                *cur += 4;
+                unsafe {
+                    source_ptr = source_ptr.add(4);
+                }
+            } else {
+                *cur += (diff.to_le().trailing_zeros() / 8) as usize;
+                return *cur - start;
+            }
+        }
+    }
+
+    if input_end - *cur >= 2
+        && unsafe { read_u16_ptr(input.as_ptr().add(*cur)) == read_u16_ptr(source_ptr) }
+    {
+        *cur += 2;
+        unsafe {
+            source_ptr = source_ptr.add(2);
+        }
+    }
+
+    if *cur < input_end
+        && unsafe { input.as_ptr().add(*cur).read() } == unsafe { source_ptr.read() }
+    {
+        *cur += 1;
+    }
+
+    *cur - start
 }
 
 /// Write an integer to the output.
