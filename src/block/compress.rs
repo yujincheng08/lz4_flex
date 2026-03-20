@@ -110,7 +110,7 @@ pub(crate) fn count_same_bytes(
     candidate: usize,
     match_limit: usize,
 ) -> usize {
-    const STEP: usize = core::mem::size_of::<usize>();
+    const CMP_SIZE: usize = core::mem::size_of::<usize>();
     // Same bound as pre-match_limit API: `input.len() - END_OFFSET` when `match_limit` is that value.
     let max_input = match_limit.saturating_sub(*cur);
     let max_source = source.len().saturating_sub(candidate);
@@ -121,13 +121,13 @@ pub(crate) fn count_same_bytes(
 
     let mut num = 0;
     for (block1, block2) in cur_slice
-        .chunks_exact(STEP)
-        .zip(cand_slice.chunks_exact(STEP))
+        .chunks_exact(CMP_SIZE)
+        .zip(cand_slice.chunks_exact(CMP_SIZE))
     {
         let v1 = usize::from_ne_bytes(block1.try_into().unwrap());
         let v2 = usize::from_ne_bytes(block2.try_into().unwrap());
         if v1 == v2 {
-            num += STEP;
+            num += CMP_SIZE;
         } else {
             num += ((v1 ^ v2).to_le().trailing_zeros() / 8) as usize;
             *cur += num;
@@ -173,14 +173,14 @@ pub(crate) fn count_same_bytes(
     let start = *cur;
     let mut source_ptr = unsafe { source.as_ptr().add(candidate) };
 
-    const STEP_SIZE: usize = core::mem::size_of::<usize>();
-    while *cur + STEP_SIZE <= input_end {
+    const CMP_SIZE: usize = core::mem::size_of::<usize>();
+    while *cur + CMP_SIZE <= input_end {
         let diff = read_usize_ptr(unsafe { input.as_ptr().add(*cur) }) ^ read_usize_ptr(source_ptr);
 
         if diff == 0 {
-            *cur += STEP_SIZE;
+            *cur += CMP_SIZE;
             unsafe {
-                source_ptr = source_ptr.add(STEP_SIZE);
+                source_ptr = source_ptr.add(CMP_SIZE);
             }
         } else {
             *cur += (diff.to_le().trailing_zeros() / 8) as usize;
