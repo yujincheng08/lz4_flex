@@ -96,7 +96,7 @@ impl Match {
         }
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn end(&self) -> usize {
         self.start as usize + self.len as usize
     }
@@ -107,7 +107,7 @@ impl Match {
         self.len = self.len.saturating_sub(correction as u32);
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn offset(&self) -> u16 {
         self.start.wrapping_sub(self.ref_pos) as u16
     }
@@ -122,9 +122,11 @@ impl Match {
     }
 }
 
-/// Count how many consecutive bytes starting at `pos` equal a single repeated
-/// byte value. `pattern` is that byte broadcast to all 4 lanes of a `u32`
-/// (e.g. `0xABABABAB`). Widened to `usize` internally for batch comparison.
+/// Count how many consecutive bytes starting at `pos` are all the same value
+/// (e.g. every byte is `0xAB`). Callers pass that byte **replicated four times**
+/// in the low 32 bits: `let b: u8 = ...; let pattern = u32::from_ne_bytes([b, b, b, b])`
+/// so `0xAB` becomes `0xABABABAB`. That word is XOR’d against loaded chunks to find
+/// where the run ends; it is widened to `usize` for batch comparison on 32/64-bit.
 /// Equivalent to C's LZ4HC_countPattern.
 #[inline]
 fn count_pattern(input: &[u8], pos: usize, limit: usize, pattern: u32) -> usize {
@@ -158,9 +160,8 @@ fn count_pattern(input: &[u8], pos: usize, limit: usize, pattern: u32) -> usize 
     p - pos
 }
 
-/// Count how many consecutive bytes going backward from `pos` match a single
-/// repeated byte value. `pattern` is that byte broadcast to all 4 lanes of a
-/// `u32`, same encoding as [`count_pattern`].
+/// Like [`count_pattern`], but walks backward. `pattern` is one byte repeated
+/// four times in a `u32` (same encoding as [`count_pattern`]).
 /// Equivalent to C's LZ4HC_reverseCountPattern.
 #[inline]
 fn reverse_count_pattern(input: &[u8], pos: usize, low_limit: usize, pattern: u32) -> usize {
@@ -304,20 +305,20 @@ impl HashTableHCU32 {
     }
 
     /// Get the next position in the chain for a given offset
-    #[inline(always)]
+    #[inline]
     fn next(&self, pos: usize) -> usize {
         let idx = pos & self.chain_mask();
         pos - (self.chain_table[idx] as usize)
     }
 
     /// Get the raw chain delta at a position (equivalent to C's DELTANEXTU16)
-    #[inline(always)]
+    #[inline]
     fn chain_delta(&self, pos: usize) -> u16 {
         let idx = pos & self.chain_mask();
         self.chain_table[idx]
     }
 
-    #[inline(always)]
+    #[inline]
     fn add_hash(&mut self, hash: usize, pos: usize) {
         let chain_idx = pos & self.chain_mask();
         let delta = pos - self.dict[hash] as usize;
@@ -331,19 +332,19 @@ impl HashTableHCU32 {
     }
 
     /// Get dict value at hash position
-    #[inline(always)]
+    #[inline]
     fn get_dict(&self, hash: usize) -> usize {
         self.dict[hash] as usize
     }
 
     /// Set dict value at hash position
-    #[inline(always)]
+    #[inline]
     fn set_dict(&mut self, hash: usize, pos: usize) {
         self.dict[hash] = pos as u32;
     }
 
     /// Set chain value at position
-    #[inline(always)]
+    #[inline]
     fn set_chain(&mut self, pos: usize, delta: u16) {
         let idx = pos & self.chain_mask();
         self.chain_table[idx] = delta;
@@ -761,7 +762,7 @@ impl HashTableHCU32 {
             if ref_in_input {
                 let ref_local = candidate_abs - stream_offset;
 
-                let pre_check_ok = if best_len >= MIN_MATCH {
+                let tail_matches_past_best = if best_len >= MIN_MATCH {
                     let check_pos = best_len - 1;
                     #[cfg(not(feature = "safe-encode"))]
                     unsafe {
@@ -777,7 +778,7 @@ impl HashTableHCU32 {
                     true
                 };
 
-                if pre_check_ok && self.read_min_match_equals(input, ref_local, off) {
+                if tail_matches_past_best && self.read_min_match_equals(input, ref_local, off) {
                     match_len = MIN_MATCH
                         + self.common_bytes(
                             input,
@@ -1416,7 +1417,7 @@ fn compress_mid_internal(
     let ilimit = input_end.saturating_sub(8);
     let match_limit = input_end - END_OFFSET;
 
-    #[inline(always)]
+    #[inline]
     fn add_hash8(
         hash8: &mut [u32; LZ4MID_HASHTABLE_SIZE],
         input: &[u8],
@@ -1430,7 +1431,7 @@ fn compress_mid_internal(
         }
     }
 
-    #[inline(always)]
+    #[inline]
     fn add_hash4(
         hash4: &mut [u32; LZ4MID_HASHTABLE_SIZE],
         input: &[u8],
@@ -1446,7 +1447,7 @@ fn compress_mid_internal(
 
     /// Resolve an absolute hash table position to a source slice and local index.
     /// Returns `(source, local_index, distance_from_ip)`.
-    #[inline(always)]
+    #[inline]
     fn resolve_candidate<'a>(
         candidate_abs: usize,
         ip_abs: usize,
