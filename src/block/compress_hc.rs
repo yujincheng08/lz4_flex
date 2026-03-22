@@ -230,6 +230,17 @@ fn count_forward_ext_dict(
     }
 }
 
+/// Result of pattern/repeat chain optimization inside [`HashTableHCU32::find_longer_match`]
+/// (mirrors LZ4HC repeat detection).
+enum PatternChainAction {
+    /// Continue with normal chain-step logic at the end of the loop body.
+    Noop,
+    /// Set `candidate_abs` and restart the search loop iteration (`continue`).
+    RetryCandidate(usize),
+    /// Exit the search loop (`break`).
+    StopSearch,
+}
+
 impl HashTableHCU32 {
     #[inline]
     pub fn new(max_attempts: usize, input_len: usize) -> Self {
@@ -722,6 +733,86 @@ impl HashTableHCU32 {
         len
     }
 
+    /// Pattern / repeat chain optimization when `chain_delta(candidate_abs) == 1` and
+    /// `match_chain_pos == 0`. Returns an action for the outer search loop.
+    fn pattern_chain_action(
+        &self,
+        input: &[u8],
+        off: usize,
+        match_limit: usize,
+        abs_off: usize,
+        stream_offset: usize,
+        candidate_abs: usize,
+        match_chain_pos: usize,
+        repeat: &mut u8,
+        src_pattern_length: &mut usize,
+        best_len: &mut usize,
+        best_offset: &mut u16,
+    ) -> PatternChainAction {
+        if self.chain_delta(candidate_abs) != 1 || match_chain_pos != 0 {
+            return PatternChainAction::Noop;
+        }
+
+        let match_candidate = candidate_abs.wrapping_sub(1);
+
+        if *repeat == 0 {
+            let pattern = super::compress::get_batch(input, off);
+            if (pattern & 0xFFFF) == (pattern >> 16) && (pattern & 0xFF) == (pattern >> 24) {
+                *repeat = 1;
+                *src_pattern_length = count_pattern(input, off + 4, match_limit, pattern) + 4;
+            } else {
+                *repeat = 2;
+            }
+        }
+
+        if *repeat != 1 {
+            return PatternChainAction::Noop;
+        }
+
+        if match_candidate >= abs_off
+            || abs_off - match_candidate > self.chain_mask()
+            || match_candidate < stream_offset
+        {
+            return PatternChainAction::Noop;
+        }
+
+        let mc_local = match_candidate - stream_offset;
+        let pattern = super::compress::get_batch(input, off);
+        if mc_local + 4 > input.len() || super::compress::get_batch(input, mc_local) != pattern {
+            return PatternChainAction::Noop;
+        }
+
+        let forward_pattern_len = count_pattern(input, mc_local + 4, match_limit, pattern) + 4;
+        let back_length = reverse_count_pattern(input, mc_local, 0, pattern);
+        let current_segment_len = back_length + forward_pattern_len;
+
+        if current_segment_len >= *src_pattern_length && forward_pattern_len <= *src_pattern_length
+        {
+            let new_ref_local = mc_local + forward_pattern_len - *src_pattern_length;
+            let new_ref_abs = new_ref_local + stream_offset;
+            if abs_off > new_ref_abs && abs_off - new_ref_abs <= self.chain_mask() {
+                return PatternChainAction::RetryCandidate(new_ref_abs);
+            }
+        } else {
+            let new_ref_local = mc_local - back_length;
+            let new_ref_abs = new_ref_local + stream_offset;
+            if abs_off > new_ref_abs && abs_off - new_ref_abs <= self.chain_mask() {
+                let max_ml = current_segment_len.min(*src_pattern_length);
+                if max_ml > *best_len {
+                    *best_len = max_ml;
+                    *best_offset = (abs_off - new_ref_abs) as u16;
+                }
+                let dist = self.chain_delta(new_ref_abs) as usize;
+                if dist == 0 || dist > new_ref_abs {
+                    return PatternChainAction::StopSearch;
+                }
+                return PatternChainAction::RetryCandidate(new_ref_abs - dist);
+            }
+        }
+
+        PatternChainAction::Noop
+    }
+
     /// Find the longest match at `off`, returning `(match_len_u32, offset_u16)`.
     /// Uses u32 params to reduce call overhead (LZ4 block max is ~2GB).
     /// Offset is u16 since LZ4 format limits distance to 16 bits.
@@ -823,73 +914,25 @@ impl HashTableHCU32 {
                     }
                 }
 
-                // Pattern analysis: only for input matches
-                {
-                    let dist_next = self.chain_delta(candidate_abs);
-                    if dist_next == 1 && match_chain_pos == 0 {
-                        let match_candidate = candidate_abs.wrapping_sub(1);
-                        if repeat == 0 {
-                            let pattern = super::compress::get_batch(input, off);
-                            if (pattern & 0xFFFF) == (pattern >> 16)
-                                && (pattern & 0xFF) == (pattern >> 24)
-                            {
-                                repeat = 1;
-                                src_pattern_length =
-                                    count_pattern(input, off + 4, match_limit, pattern) + 4;
-                            } else {
-                                repeat = 2;
-                            }
-                        }
-                        if repeat == 1
-                            && match_candidate < abs_off
-                            && abs_off - match_candidate <= self.chain_mask()
-                            && match_candidate >= stream_offset
-                        {
-                            let mc_local = match_candidate - stream_offset;
-                            let pattern = super::compress::get_batch(input, off);
-                            if mc_local + 4 <= input.len()
-                                && super::compress::get_batch(input, mc_local) == pattern
-                            {
-                                let forward_pattern_len =
-                                    count_pattern(input, mc_local + 4, match_limit, pattern) + 4;
-                                let back_length =
-                                    reverse_count_pattern(input, mc_local, 0, pattern);
-                                let current_segment_len = back_length + forward_pattern_len;
-
-                                if current_segment_len >= src_pattern_length
-                                    && forward_pattern_len <= src_pattern_length
-                                {
-                                    let new_ref_local =
-                                        mc_local + forward_pattern_len - src_pattern_length;
-                                    let new_ref_abs = new_ref_local + stream_offset;
-                                    if abs_off > new_ref_abs
-                                        && abs_off - new_ref_abs <= self.chain_mask()
-                                    {
-                                        candidate_abs = new_ref_abs;
-                                        continue;
-                                    }
-                                } else {
-                                    let new_ref_local = mc_local - back_length;
-                                    let new_ref_abs = new_ref_local + stream_offset;
-                                    if abs_off > new_ref_abs
-                                        && abs_off - new_ref_abs <= self.chain_mask()
-                                    {
-                                        let max_ml = current_segment_len.min(src_pattern_length);
-                                        if max_ml > best_len {
-                                            best_len = max_ml;
-                                            best_offset = (abs_off - new_ref_abs) as u16;
-                                        }
-                                        let dist = self.chain_delta(new_ref_abs) as usize;
-                                        if dist == 0 || dist > new_ref_abs {
-                                            break;
-                                        }
-                                        candidate_abs = new_ref_abs - dist;
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
+                match self.pattern_chain_action(
+                    input,
+                    off,
+                    match_limit,
+                    abs_off,
+                    stream_offset,
+                    candidate_abs,
+                    match_chain_pos,
+                    &mut repeat,
+                    &mut src_pattern_length,
+                    &mut best_len,
+                    &mut best_offset,
+                ) {
+                    PatternChainAction::RetryCandidate(new_abs) => {
+                        candidate_abs = new_abs;
+                        continue;
                     }
+                    PatternChainAction::StopSearch => break,
+                    PatternChainAction::Noop => {}
                 }
             } else if !ext_dict.is_empty() && candidate_abs >= ext_dict_stream_offset {
                 let ref_local = candidate_abs - ext_dict_stream_offset;
