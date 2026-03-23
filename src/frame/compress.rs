@@ -13,7 +13,9 @@ use crate::{
     sink::vec_sink_for_compression,
 };
 
-use crate::block::compress_hc::{compress_hc_linked, compress_hc_with_table, CompressTableHC};
+use crate::block::compress_hc::{
+    compress_hc_linked, compress_hc_with_table, hc_level_params, CompressTableHC,
+};
 
 use super::Error;
 use super::{
@@ -387,16 +389,14 @@ impl<W: io::Write> FrameEncoder<W> {
                 &[] as &[u8]
             };
 
-            hc_table.prepare_linked_block(
-                self.compression_level,
-                self.src_start + self.src_stream_offset,
-            );
+            let hc_params = hc_level_params(self.compression_level.min(12));
+            hc_table.prepare_linked_block(hc_params, self.src_start + self.src_stream_offset);
 
             compress_hc_linked(
                 input,
                 self.src_start,
                 &mut vec_sink_for_compression(&mut self.dst, 0, 0, dst_required_size),
-                self.compression_level,
+                hc_params,
                 hc_table,
                 ext_dict,
                 self.src_stream_offset,
